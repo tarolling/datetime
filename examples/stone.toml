@@ -1,0 +1,9 @@
+# Runs the examples against the package in the directory above:
+#   cd examples && stone run tour.stn
+[package]
+name = "examples"
+version = "0.1.0"
+stone = "0.4"
+
+[dependencies]
+datetime = { path = ".." }

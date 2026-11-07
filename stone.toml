@@ -1,0 +1,6 @@
+[package]
+name = "datetime"
+version = "0.1.0"
+stone = "0.4"
+description = "Dates, times, durations, and UTC offsets, with ISO 8601 and strftime formatting"
+license = "Apache-2.0"

@@ -1,0 +1,616 @@
+// Parsing: strptime-style patterns, and strict ISO 8601. Internal to the datetime package.
+//
+// The functions here read text into plain ints and check only what the text itself says, such as
+// that a month has two digits. `lib.stn` checks the values, as that day 31 exists in the month,
+// when it builds a value from them.
+
+use internal.civil
+use internal.text
+
+// What a pattern read from the text. Each part is `none` until a specifier sets it.
+pub struct Parsed:
+    year: option[int]
+    century: option[int]
+    year_of_century: option[int]
+    iso_year: option[int]
+    iso_week: option[int]
+    month: option[int]
+    day: option[int]
+    day_of_year: option[int]
+    weekday: option[int]
+    hour: option[int]
+    hour12: option[int]
+    pm: option[bool]
+    minute: option[int]
+    second: option[int]
+    nanosecond: option[int]
+    offset: option[int]
+    unix: option[int]
+
+fn empty() -> Parsed:
+    ret Parsed(year=none, century=none, year_of_century=none, iso_year=none, iso_week=none, month=none, day=none, day_of_year=none, weekday=none, hour=none, hour12=none, pm=none, minute=none, second=none, nanosecond=none, offset=none, unix=none)
+
+// Reads at least `min` and at most `max` digits from position `i`, returning their value and the
+// position after them.
+pub fn digits(cs: list[str], i: int, min: int, max: int) -> result[tuple[int, int], str]:
+    n = 0
+    j = i
+    while j < cs.len() and j - i < max and text.is_digit(cs[j]):
+        n = n * 10 + text.digit_value(cs[j])
+        j += 1
+    if j - i < min:
+        if min == max:
+            ret err("expected {min} digits at position {i}")
+        ret err("expected a number at position {i}")
+    ret ok((n, j))
+
+// Reads an optional `+` or `-` at position `i`, returning -1, 0 (for no sign), or 1, and the
+// position after it.
+fn sign(cs: list[str], i: int) -> tuple[int, int]:
+    if i < cs.len() and cs[i] == "+":
+        ret (1, i + 1)
+    if i < cs.len() and cs[i] == "-":
+        ret (-1, i + 1)
+    ret (0, i)
+
+fn expect(cs: list[str], i: int, c: str) -> result[int, str]:
+    if i >= cs.len():
+        ret err("expected '{c}' at position {i}, found the end")
+    if cs[i] != c:
+        ret err("expected '{c}' at position {i}, found '{cs[i]}'")
+    ret ok(i + 1)
+
+fn at_end(cs: list[str], i: int) -> result[bool, str]:
+    if i < cs.len():
+        ret err("unexpected '{cs[i]}' at position {i}")
+    ret ok(true)
+
+// Reads a fraction of a second of 1 to 9 digits, returning nanoseconds.
+fn fraction(cs: list[str], i: int) -> result[tuple[int, int], str]:
+    n, j = digits(cs, i, 1, 9)?
+    for _k in range(9 - (j - i)):
+        n *= 10
+    ret ok((n, j))
+
+// Reads the name at position `i` that is one of `names`, ignoring case, returning its index and
+// the position after it. Longer names are tried first, so "June" wins over "Jun".
+fn name(cs: list[str], i: int, names: list[str], what: str) -> result[tuple[int, int], str]:
+    best = -1
+    best_len = 0
+    for k in range(names.len()):
+        n = names[k].len()
+        if n > best_len and i + n <= cs.len() and "".join(cs[i:i + n]).lower() == names[k].lower():
+            best = k
+            best_len = n
+    if best < 0:
+        ret err("expected {what} at position {i}")
+    ret ok((best, i + best_len))
+
+fn month_names() -> list[str]:
+    out = []
+    for m in range(1, 13):
+        out.append(text.month_name(m))
+    for m in range(1, 13):
+        out.append(text.month_abbr(m))
+    ret out
+
+fn weekday_names() -> list[str]:
+    out = []
+    for d in range(1, 8):
+        out.append(text.weekday_name(d))
+    for d in range(1, 8):
+        out.append(text.weekday_abbr(d))
+    ret out
+
+// Reads an offset at position `i`: `Z` or `z`, or a sign and hours, then optionally minutes and
+// seconds. With `colon`, minutes and seconds follow a `:`; without it they may or may not.
+fn offset(cs: list[str], i: int, colon: bool) -> result[tuple[int, int], str]:
+    if i < cs.len() and (cs[i] == "Z" or cs[i] == "z"):
+        ret ok((0, i + 1))
+    s, j = sign(cs, i)
+    if s == 0:
+        ret err("expected an offset such as 'Z' or '+05:30' at position {i}")
+    h, j = digits(cs, j, 2, 2)?
+    total = h * 3600
+    for unit in [60, 1]:
+        k = j
+        if k < cs.len() and cs[k] == ":":
+            k += 1
+        elif colon:
+            break
+        if k < cs.len() and text.is_digit(cs[k]):
+            v, k = digits(cs, k, 2, 2)?
+            if v > 59:
+                ret err("offset part {v} is out of range (0 to 59) at position {j}")
+            total += v * unit
+            j = k
+        else:
+            break
+    ret ok((s * total, j))
+
+// Spells out the specifiers that stand for other patterns, as `%F` for `%Y-%m-%d`, leaving
+// `%%` as it is so `%%F` stays a literal `%F`.
+fn expand(pattern: str) -> list[str]:
+    ps = text.chars(pattern)
+    out = []
+    k = 0
+    while k < ps.len():
+        c = ps[k]
+        k += 1
+        out.append(c)
+        if c != "%" or k >= ps.len():
+            cont
+        spec = ps[k]
+        k += 1
+        long = ""
+        if spec == "F":
+            long = "Y-%m-%d"
+        elif spec == "D" or spec == "x":
+            long = "m/%d/%y"
+        elif spec == "T" or spec == "X":
+            long = "H:%M:%S"
+        elif spec == "R":
+            long = "H:%M"
+        elif spec == "c":
+            long = "a %b %e %H:%M:%S %Y"
+        else:
+            long = spec
+        for d in long:
+            out.append(d)
+    ret out
+
+// Reads `input` as `pattern` says. See the README for the specifiers.
+pub fn strptime(input: str, pattern: str) -> result[Parsed, str]:
+    cs = text.chars(input)
+    ps = expand(pattern)
+    p = empty()
+    i = 0
+    k = 0
+    while k < ps.len():
+        c = ps[k]
+        k += 1
+        if c != "%":
+            i = expect(cs, i, c)?
+            cont
+        if k >= ps.len():
+            ret err("format pattern '{pattern}' ends with a lone '%'")
+        colon = false
+        width = 0
+        if ps[k] == "-" and k + 1 < ps.len():
+            k += 1
+        if ps[k] == ":" and k + 1 < ps.len() and ps[k + 1] == "z":
+            colon = true
+            k += 1
+        if (ps[k] == "3" or ps[k] == "6" or ps[k] == "9") and k + 1 < ps.len() and ps[k + 1] == "f":
+            width = text.digit_value(ps[k])
+            k += 1
+        spec = ps[k]
+        k += 1
+        if spec == "%":
+            i = expect(cs, i, "%")?
+        elif spec == "n" or spec == "t":
+            while i < cs.len() and (cs[i] == " " or cs[i] == "\t" or cs[i] == "\n" or cs[i] == "\r"):
+                i += 1
+        elif "YCyGmdejaAbBhuwVHIMSpPfzZs".contains(spec):
+            p, i = read(cs, i, spec, colon, width, p)?
+        else:
+            ret err("unknown format specifier '%{spec}'")
+    at_end(cs, i)?
+    ret ok(p)
+
+// Reads the specifier `spec` at position `i`, returning `p` with the part it sets and the
+// position after it.
+fn read(cs: list[str], i: int, spec: str, colon: bool, width: int, p: Parsed) -> result[tuple[Parsed, int], str]:
+    q = p
+    if spec == "Y" or spec == "G":
+        s, j = sign(cs, i)
+        max = 4
+        if s != 0:
+            max = 9
+        else:
+            s = 1
+        n, j = digits(cs, j, 1, max)?
+        if spec == "Y":
+            q.year = some(s * n)
+        else:
+            q.iso_year = some(s * n)
+        ret ok((q, j))
+    if spec == "s":
+        s, j = sign(cs, i)
+        if s == 0:
+            s = 1
+        n, j = digits(cs, j, 1, 15)?
+        q.unix = some(s * n)
+        ret ok((q, j))
+    if spec == "C" or spec == "y" or spec == "m" or spec == "d" or spec == "H" or spec == "I" or spec == "M" or spec == "S" or spec == "V":
+        n, j = digits(cs, i, 1, 2)?
+        if spec == "C":
+            q.century = some(n)
+        elif spec == "y":
+            q.year_of_century = some(n)
+        elif spec == "m":
+            q.month = some(n)
+        elif spec == "d":
+            q.day = some(n)
+        elif spec == "H":
+            q.hour = some(n)
+        elif spec == "I":
+            q.hour12 = some(n)
+        elif spec == "M":
+            q.minute = some(n)
+        elif spec == "S":
+            q.second = some(n)
+        else:
+            q.iso_week = some(n)
+        ret ok((q, j))
+    if spec == "e":
+        j = i
+        if j < cs.len() and cs[j] == " ":
+            j += 1
+        n, j = digits(cs, j, 1, 2)?
+        q.day = some(n)
+        ret ok((q, j))
+    if spec == "j":
+        n, j = digits(cs, i, 1, 3)?
+        q.day_of_year = some(n)
+        ret ok((q, j))
+    if spec == "u" or spec == "w":
+        n, j = digits(cs, i, 1, 1)?
+        if spec == "w":
+            if n > 6:
+                ret err("weekday {n} is out of range (0 to 6) at position {i}")
+            if n == 0:
+                n = 7
+        elif n < 1 or n > 7:
+            ret err("weekday {n} is out of range (1 to 7) at position {i}")
+        q.weekday = some(n)
+        ret ok((q, j))
+    if spec == "f":
+        n = 0
+        j = i
+        if width == 0:
+            n, j = fraction(cs, i)?
+        else:
+            n, j = digits(cs, i, width, width)?
+            for _k in range(9 - width):
+                n *= 10
+        q.nanosecond = some(n)
+        ret ok((q, j))
+    if spec == "b" or spec == "B" or spec == "h":
+        k, j = name(cs, i, month_names(), "a month name")?
+        q.month = some(k % 12 + 1)
+        ret ok((q, j))
+    if spec == "a" or spec == "A":
+        k, j = name(cs, i, weekday_names(), "a weekday name")?
+        q.weekday = some(k % 7 + 1)
+        ret ok((q, j))
+    if spec == "p" or spec == "P":
+        k, j = name(cs, i, ["AM", "PM"], "AM or PM")?
+        q.pm = some(k == 1)
+        ret ok((q, j))
+    if spec == "Z":
+        k = i
+        if k + 3 <= cs.len() and ("".join(cs[k:k + 3]) == "UTC" or "".join(cs[k:k + 3]) == "GMT"):
+            q.offset = some(0)
+            ret ok((q, k + 3))
+        n, j = offset(cs, i, true)?
+        q.offset = some(n)
+        ret ok((q, j))
+    n, j = offset(cs, i, colon)?
+    q.offset = some(n)
+    ret ok((q, j))
+
+// The (year, month, day) the parts give, `none` if they give no date, or an error if they give
+// only part of one or parts that disagree.
+pub fn resolve_date(p: Parsed) -> result[option[tuple[int, int, int]], str]:
+    if p.unix.is_some():
+        local = p.unix.unwrap() + p.offset.unwrap_or(0)
+        ret ok(some(civil.civil_from_days(civil.floor_div(local, 86400))))
+    year = p.year
+    if year.is_none() and p.year_of_century.is_some():
+        yy = p.year_of_century.unwrap()
+        if p.century.is_some():
+            year = some(p.century.unwrap() * 100 + yy)
+        elif yy < 69:
+            year = some(2000 + yy)
+        else:
+            year = some(1900 + yy)
+    elif year.is_none() and p.century.is_some():
+        year = some(p.century.unwrap() * 100)
+    date = none
+    if year.is_some() and p.month.is_some() and p.day.is_some():
+        y = year.unwrap()
+        m = p.month.unwrap()
+        d = p.day.unwrap()
+        if m < 1 or m > 12:
+            ret err("month {m} is out of range (1 to 12)")
+        if d < 1 or d > civil.days_in_month(y, m):
+            ret err("day {d} is out of range for {text.year_text(y)}-{text.pad(m, 2)} (1 to {civil.days_in_month(y, m)})")
+        date = some((y, m, d))
+    elif year.is_some() and p.day_of_year.is_some():
+        y = year.unwrap()
+        n = p.day_of_year.unwrap()
+        if n < 1 or n > civil.days_in_year(y):
+            ret err("day of year {n} is out of range for {text.year_text(y)} (1 to {civil.days_in_year(y)})")
+        date = some(civil.civil_from_days(civil.days_from_civil(y, 1, 1) + n - 1))
+    elif p.iso_year.is_some() and p.iso_week.is_some() and p.weekday.is_some():
+        y = p.iso_year.unwrap()
+        w = p.iso_week.unwrap()
+        if w < 1 or w > civil.iso_weeks_in_year(y):
+            ret err("week {w} is out of range for {text.year_text(y)} (1 to {civil.iso_weeks_in_year(y)})")
+        date = some(civil.civil_from_days(civil.days_from_iso_week(y, w, p.weekday.unwrap())))
+    elif year.is_some() or p.month.is_some() or p.day.is_some() or p.iso_year.is_some() or p.iso_week.is_some() or p.day_of_year.is_some():
+        ret err("the text gives only part of a date")
+    match date:
+        case some(ymd):
+            y, m, d = ymd
+            if p.weekday.is_some():
+                wd = civil.weekday_from_days(civil.days_from_civil(y, m, d))
+                if wd != p.weekday.unwrap():
+                    ret err("{text.year_text(y)}-{text.pad(m, 2)}-{text.pad(d, 2)} is a {text.weekday_name(wd)}, not a {text.weekday_name(p.weekday.unwrap())}")
+            ret ok(some(ymd))
+        case none:
+            ret ok(none)
+
+// The (hour, minute, second, nanosecond) the parts give, `none` if they give no time of day.
+// Minutes, seconds, and nanoseconds left out are 0.
+pub fn resolve_time(p: Parsed) -> result[option[tuple[int, int, int, int]], str]:
+    nanos = p.nanosecond.unwrap_or(0)
+    if p.unix.is_some():
+        local = civil.floor_mod(p.unix.unwrap() + p.offset.unwrap_or(0), 86400)
+        ret ok(some((local / 3600, local / 60 % 60, local % 60, nanos)))
+    hour = p.hour
+    if p.hour12.is_some():
+        h = p.hour12.unwrap()
+        if h < 1 or h > 12:
+            ret err("hour {h} is out of range (1 to 12)")
+        h = h % 12
+        if p.pm.unwrap_or(false):
+            h += 12
+        if hour.is_some() and hour.unwrap() != h:
+            ret err("the 12-hour and 24-hour hours disagree")
+        hour = some(h)
+    if hour.is_none():
+        if p.minute.is_some() or p.second.is_some() or p.nanosecond.is_some():
+            ret err("the text gives a time of day without its hour")
+        ret ok(none)
+    ret ok(some((hour.unwrap(), p.minute.unwrap_or(0), p.second.unwrap_or(0), nanos)))
+
+// ISO 8601 calendar date at position `i`: `YYYY-MM-DD`, or a sign and 4 or more year digits.
+// Returns (year, month, day, position after).
+pub fn iso_date(cs: list[str], i: int) -> result[tuple[int, int, int, int], str]:
+    s, j = sign(cs, i)
+    y = 0
+    if s == 0:
+        y, j = digits(cs, j, 4, 4)?
+    else:
+        y, j = digits(cs, j, 4, 9)?
+        y *= s
+    j = expect(cs, j, "-")?
+    m, j = digits(cs, j, 2, 2)?
+    j = expect(cs, j, "-")?
+    d, j = digits(cs, j, 2, 2)?
+    ret ok((y, m, d, j))
+
+// ISO 8601 time of day at position `i`: `hh:mm`, `hh:mm:ss`, or `hh:mm:ss` and a fraction after
+// `.` or `,`. Returns (hour, minute, second, nanosecond, position after).
+pub fn iso_time(cs: list[str], i: int) -> result[tuple[int, int, int, int, int], str]:
+    h, j = digits(cs, i, 2, 2)?
+    j = expect(cs, j, ":")?
+    m, j = digits(cs, j, 2, 2)?
+    s = 0
+    ns = 0
+    if j < cs.len() and cs[j] == ":":
+        s, j = digits(cs, j + 1, 2, 2)?
+        if j < cs.len() and (cs[j] == "." or cs[j] == ","):
+            ns, j = fraction(cs, j + 1)?
+    ret ok((h, m, s, ns, j))
+
+// ISO 8601 offset at position `i`: `Z`, `z`, `+hh`, `+hhmm`, `+hh:mm`, or `+hh:mm:ss`.
+pub fn iso_offset(cs: list[str], i: int) -> result[tuple[int, int], str]:
+    ret offset(cs, i, false)
+
+// An ISO 8601 date and time at position `i`, with `T`, `t`, or a space between them. Returns
+// (year, month, day, hour, minute, second, nanosecond, position after).
+pub fn iso_datetime(cs: list[str], i: int) -> result[tuple[int, int, int, int, int, int, int, int], str]:
+    y, mo, d, j = iso_date(cs, i)?
+    if j >= cs.len() or (cs[j] != "T" and cs[j] != "t" and cs[j] != " "):
+        ret err("expected 'T' between the date and the time at position {j}")
+    h, mi, s, ns, j = iso_time(cs, j + 1)?
+    ret ok((y, mo, d, h, mi, s, ns, j))
+
+// Checks that nothing follows position `i`.
+pub fn iso_end(cs: list[str], i: int) -> result[bool, str]:
+    ret at_end(cs, i)
+
+// An ISO 8601 duration of days, hours, minutes, and seconds, as `PT1H30M`, `P2DT0.5S`, or
+// `-PT10S`, returning (seconds, nanoseconds) with nanoseconds from 0 to 999999999 toward the
+// sign. A day is 86400 seconds. Years and months are not durations; they are periods.
+pub fn iso_duration(input: str) -> result[tuple[int, int], str]:
+    cs = text.chars(input)
+    s, i = sign(cs, 0)
+    if s == 0:
+        s = 1
+    if i >= cs.len() or (cs[i] != "P" and cs[i] != "p"):
+        ret err("expected 'P' at position {i}")
+    i += 1
+    total = 0
+    nanos = 0
+    any = false
+    in_time = false
+    units = "DHMS"
+    last = -1
+    while i < cs.len():
+        if (cs[i] == "T" or cs[i] == "t") and not in_time:
+            in_time = true
+            i += 1
+            if i >= cs.len():
+                ret err("expected a number after 'T' at position {i}")
+            cont
+        n, j = digits(cs, i, 1, 15)?
+        frac = 0
+        if j < cs.len() and (cs[j] == "." or cs[j] == ","):
+            frac, j = fraction(cs, j + 1)?
+        if j >= cs.len():
+            ret err("expected a unit after the number at position {j}")
+        u = cs[j].upper()
+        if u == "Y" or (u == "M" and not in_time) or u == "W":
+            ret err("'{cs[j]}' at position {j} is a calendar unit; use a Period for it")
+        k = units.find(u)
+        if k.is_none():
+            ret err("unknown unit '{cs[j]}' at position {j}")
+        idx = k.unwrap()
+        if (idx == 0) == in_time:
+            ret err("'{cs[j]}' at position {j} belongs on the other side of 'T'")
+        if idx <= last:
+            ret err("'{cs[j]}' at position {j} is out of order")
+        if frac != 0 and u != "S":
+            ret err("only seconds may have a fraction, at position {i}")
+        last = idx
+        per = [86400, 3600, 60, 1][idx]
+        match civil.checked_mul(n, per):
+            case some(v):
+                total = civil.checked_add(total, v).unwrap_or(4611686018427387904)
+            case none:
+                ret err("the duration is too long")
+        if total > 4611686018427387903:
+            ret err("the duration is too long")
+        nanos = frac
+        any = true
+        i = j + 1
+    if not any:
+        ret err("expected at least one number and unit")
+    if s < 0:
+        if nanos > 0:
+            ret ok((-total - 1, 1000000000 - nanos))
+        ret ok((-total, 0))
+    ret ok((total, nanos))
+
+// An ISO 8601 period of years, months, weeks, and days, as `P1Y2M3D`, `P2W`, or `-P1M`, where
+// each number may also have its own sign, as `P1Y-2M`. Returns (years, months, days), with a
+// week as 7 days.
+pub fn iso_period(input: str) -> result[tuple[int, int, int], str]:
+    cs = text.chars(input)
+    s, i = sign(cs, 0)
+    if s == 0:
+        s = 1
+    if i >= cs.len() or (cs[i] != "P" and cs[i] != "p"):
+        ret err("expected 'P' at position {i}")
+    i += 1
+    parts = [0, 0, 0, 0]
+    last = -1
+    while i < cs.len():
+        ns, j = sign(cs, i)
+        if ns == 0:
+            ns = 1
+        n, j = digits(cs, j, 1, 15)?
+        if j >= cs.len():
+            ret err("expected a unit after the number at position {j}")
+        k = "YMWD".find(cs[j].upper())
+        if k.is_none():
+            ret err("unknown unit '{cs[j]}' at position {j}; a period has years, months, weeks, and days")
+        idx = k.unwrap()
+        if idx <= last:
+            ret err("'{cs[j]}' at position {j} is out of order")
+        last = idx
+        parts[idx] = ns * n
+        i = j + 1
+    if last < 0:
+        ret err("expected at least one number and unit")
+    ret ok((s * parts[0], s * parts[1], s * (parts[2] * 7 + parts[3])))
+
+test "digits":
+    cs = text.chars("2026-11")
+    assert digits(cs, 0, 4, 4) == ok((2026, 4))
+    assert digits(cs, 0, 1, 2) == ok((20, 2))
+    assert digits(cs, 4, 1, 2) == err("expected a number at position 4")
+    assert digits(cs, 5, 4, 4) == err("expected 4 digits at position 5")
+
+test "strptime reads dates":
+    p = strptime("2026-11-06", "%Y-%m-%d").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+    assert resolve_time(p) == ok(none)
+    p = strptime("06 November 26", "%d %B %y").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+    p = strptime("Fri, 6 nov 2026", "%a, %d %b %Y").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+    p = strptime("2026-310", "%Y-%j").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+    p = strptime("2026-W45-5", "%G-W%V-%u").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+    p = strptime("20261106", "%Y%m%d").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+    p = strptime("2026-11-06", "%F").unwrap()
+    assert resolve_date(p) == ok(some((2026, 11, 6)))
+
+test "strptime reads times and offsets":
+    p = strptime("7:05 pm", "%I:%M %p").unwrap()
+    assert resolve_time(p) == ok(some((19, 5, 0, 0)))
+    p = strptime("12:00 AM", "%I:%M %p").unwrap()
+    assert resolve_time(p) == ok(some((0, 0, 0, 0)))
+    p = strptime("19:03:31.25 -06:00", "%T.%f %:z").unwrap()
+    assert resolve_time(p) == ok(some((19, 3, 31, 250000000)))
+    assert p.offset == some(-21600)
+    p = strptime("19:03:31.123 +0530", "%H:%M:%S.%3f %z").unwrap()
+    assert p.nanosecond == some(123000000)
+    assert p.offset == some(19800)
+    p = strptime("x UTC", "x %Z").unwrap()
+    assert p.offset == some(0)
+
+test "strptime reads unix time":
+    p = strptime("-1", "%s").unwrap()
+    assert resolve_date(p) == ok(some((1969, 12, 31)))
+    assert resolve_time(p) == ok(some((23, 59, 59, 0)))
+
+test "strptime errors":
+    assert strptime("2026-11", "%Y-%m-%d").is_err()
+    assert strptime("2026-11-06x", "%Y-%m-%d") == err("unexpected 'x' at position 10")
+    assert strptime("2026/11/06", "%Y-%m-%d") == err("expected '-' at position 4, found '/'")
+    assert strptime("x", "%Q") == err("unknown format specifier '%Q'")
+    assert resolve_date(strptime("2026-02-30", "%F").unwrap()) == err("day 30 is out of range for 2026-02 (1 to 28)")
+    assert resolve_date(strptime("2026-11", "%Y-%m").unwrap()) == err("the text gives only part of a date")
+    assert resolve_date(strptime("Mon 2026-11-06", "%a %F").unwrap()) == err("2026-11-06 is a Friday, not a Monday")
+    assert resolve_time(strptime("13 PM", "%I %p").unwrap()) == err("hour 13 is out of range (1 to 12)")
+
+test "ISO 8601 dates and times":
+    assert iso_date(text.chars("2026-11-06"), 0) == ok((2026, 11, 6, 10))
+    assert iso_date(text.chars("+012026-11-06"), 0) == ok((12026, 11, 6, 13))
+    assert iso_date(text.chars("-0044-03-15"), 0) == ok((-44, 3, 15, 11))
+    assert iso_date(text.chars("26-11-06"), 0).is_err()
+    assert iso_time(text.chars("19:03"), 0) == ok((19, 3, 0, 0, 5))
+    assert iso_time(text.chars("19:03:31,5"), 0) == ok((19, 3, 31, 500000000, 10))
+    assert iso_datetime(text.chars("2026-11-06t19:03:31"), 0) == ok((2026, 11, 6, 19, 3, 31, 0, 19))
+    assert iso_datetime(text.chars("2026-11-06 19:03:31"), 0) == ok((2026, 11, 6, 19, 3, 31, 0, 19))
+    assert iso_datetime(text.chars("2026-11-06_19:03"), 0) == err("expected 'T' between the date and the time at position 10")
+
+test "ISO 8601 offsets":
+    assert iso_offset(text.chars("Z"), 0) == ok((0, 1))
+    assert iso_offset(text.chars("+05:30"), 0) == ok((19800, 6))
+    assert iso_offset(text.chars("+0530"), 0) == ok((19800, 5))
+    assert iso_offset(text.chars("-06"), 0) == ok((-21600, 3))
+    assert iso_offset(text.chars("-01:02:03"), 0) == ok((-3723, 9))
+    assert iso_offset(text.chars("+05:61"), 0).is_err()
+
+test "ISO 8601 durations":
+    assert iso_duration("PT1H30M") == ok((5400, 0))
+    assert iso_duration("P2DT0.5S") == ok((172800, 500000000))
+    assert iso_duration("-PT1.5S") == ok((-2, 500000000))
+    assert iso_duration("PT0S") == ok((0, 0))
+    assert iso_duration("pt10m") == ok((600, 0))
+    assert iso_duration("P1Y").is_err()
+    assert iso_duration("PT").is_err()
+    assert iso_duration("P").is_err()
+    assert iso_duration("PT1M1H").is_err()
+    assert iso_duration("PT1.5M").is_err()
+    assert iso_duration("P999999999999999D") == err("the duration is too long")
+    assert iso_duration("P99999999999999DT999999999999999H") == err("the duration is too long")
+
+test "ISO 8601 periods":
+    assert iso_period("P1Y2M3D") == ok((1, 2, 3))
+    assert iso_period("P2W") == ok((0, 0, 14))
+    assert iso_period("-P1M") == ok((0, -1, 0))
+    assert iso_period("P1Y-2M") == ok((1, -2, 0))
+    assert iso_period("P0D") == ok((0, 0, 0))
+    assert iso_period("P").is_err()
+    assert iso_period("PT1H").is_err()
+    assert iso_period("P1D1Y").is_err()
