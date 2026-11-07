@@ -1,0 +1,266 @@
+// strftime-style formatting of the parts of a date, a time, and an offset. Internal to the
+// datetime package: `lib.stn` builds a `Fields` from a value and calls `strftime`.
+
+use internal.civil
+use internal.text
+
+// The parts of a value to format. `has_date`, `has_time`, and `has_offset` say which parts the
+// value has, and `kind` names its type for error messages, as "Date".
+pub struct Fields:
+    kind: str
+    has_date: bool
+    has_time: bool
+    has_offset: bool
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    nanosecond: int
+    offset: int
+
+// Fields with nothing set, which a caller fills in.
+pub fn empty(kind: str) -> Fields:
+    ret Fields(kind=kind, has_date=false, has_time=false, has_offset=false, year=0, month=1, day=1, hour=0, minute=0, second=0, nanosecond=0, offset=0)
+
+// Writes `f` as `pattern` says, replacing each `%` specifier with a part of `f`, or returns an
+// error for an unknown specifier or one `f` has no part for.
+pub fn strftime(f: Fields, pattern: str) -> result[str, str]:
+    cs = text.chars(pattern)
+    out = ""
+    i = 0
+    while i < cs.len():
+        c = cs[i]
+        i += 1
+        if c != "%":
+            out += c
+            cont
+        if i >= cs.len():
+            ret err("format pattern '{pattern}' ends with a lone '%'")
+        no_pad = false
+        colon = false
+        digits = 9
+        if cs[i] == "-" and i + 1 < cs.len():
+            no_pad = true
+            i += 1
+        if cs[i] == ":" and i + 1 < cs.len() and cs[i + 1] == "z":
+            colon = true
+            i += 1
+        if (cs[i] == "3" or cs[i] == "6" or cs[i] == "9") and i + 1 < cs.len() and cs[i + 1] == "f":
+            digits = text.digit_value(cs[i])
+            i += 1
+        spec = cs[i]
+        i += 1
+        out += spec_text(f, spec, no_pad, colon, digits)?
+    ret ok(out)
+
+fn needs(f: Fields, spec: str, part: str) -> result[bool, str]:
+    has = false
+    if part == "date":
+        has = f.has_date
+    elif part == "time":
+        has = f.has_time
+    elif part == "offset":
+        has = f.has_offset
+    if not has:
+        article = "a"
+        if part == "offset":
+            article = "an"
+        ret err("'%{spec}' needs {article} {part}, which a {f.kind} does not have")
+    ret ok(true)
+
+fn num(n: int, width: int, no_pad: bool) -> str:
+    if no_pad:
+        ret str(n)
+    ret text.pad(n, width)
+
+fn spec_text(f: Fields, spec: str, no_pad: bool, colon: bool, digits: int) -> result[str, str]:
+    // Specifiers that need nothing.
+    if spec == "%":
+        ret ok("%")
+    if spec == "n":
+        ret ok("\n")
+    if spec == "t":
+        ret ok("\t")
+    // Specifiers spelled as other patterns.
+    if spec == "F":
+        ret strftime(f, "%Y-%m-%d")
+    if spec == "D" or spec == "x":
+        ret strftime(f, "%m/%d/%y")
+    if spec == "T" or spec == "X":
+        ret strftime(f, "%H:%M:%S")
+    if spec == "R":
+        ret strftime(f, "%H:%M")
+    if spec == "c":
+        ret strftime(f, "%a %b %e %H:%M:%S %Y")
+    // The date.
+    if "YCyGgmdejaAbBhuwVUW".contains(spec):
+        needs(f, spec, "date")?
+        ret ok(date_spec(f, spec, no_pad))
+    // The time of day.
+    if "HIMSpPf".contains(spec):
+        needs(f, spec, "time")?
+        ret ok(time_spec(f, spec, no_pad, digits))
+    // The offset.
+    if spec == "z":
+        needs(f, spec, "offset")?
+        ret ok(text.offset_text(f.offset, colon))
+    if spec == "Z":
+        needs(f, spec, "offset")?
+        if f.offset == 0:
+            ret ok("UTC")
+        ret ok(text.offset_text(f.offset, true))
+    if spec == "s":
+        needs(f, spec, "date")?
+        needs(f, spec, "time")?
+        days = civil.days_from_civil(f.year, f.month, f.day)
+        ret ok(str(days * 86400 + f.hour * 3600 + f.minute * 60 + f.second - f.offset))
+    ret err("unknown format specifier '%{spec}'")
+
+fn date_spec(f: Fields, spec: str, no_pad: bool) -> str:
+    if spec == "Y":
+        if no_pad:
+            ret str(f.year)
+        ret text.year_text(f.year)
+    if spec == "C":
+        ret num(civil.floor_div(f.year, 100), 2, no_pad)
+    if spec == "y":
+        ret num(civil.floor_mod(f.year, 100), 2, no_pad)
+    if spec == "m":
+        ret num(f.month, 2, no_pad)
+    if spec == "d":
+        ret num(f.day, 2, no_pad)
+    if spec == "e":
+        if no_pad:
+            ret str(f.day)
+        ret text.pad_space(f.day, 2)
+    if spec == "j":
+        ret num(civil.day_of_year(f.year, f.month, f.day), 3, no_pad)
+    if spec == "b" or spec == "h":
+        ret text.month_abbr(f.month)
+    if spec == "B":
+        ret text.month_name(f.month)
+    weekday = civil.weekday_from_days(civil.days_from_civil(f.year, f.month, f.day))
+    if spec == "a":
+        ret text.weekday_abbr(weekday)
+    if spec == "A":
+        ret text.weekday_name(weekday)
+    if spec == "u":
+        ret str(weekday)
+    if spec == "w":
+        ret str(weekday % 7)
+    if spec == "U" or spec == "W":
+        // Weeks starting on Sunday (U) or Monday (W), the first of which starts on the year's
+        // first Sunday or Monday, with the days before it in week 0.
+        yday = civil.day_of_year(f.year, f.month, f.day) - 1
+        days_since_start = weekday % 7
+        if spec == "W":
+            days_since_start = weekday - 1
+        ret num((yday + 7 - days_since_start) / 7, 2, no_pad)
+    iso_year, week = civil.iso_week(f.year, f.month, f.day)
+    if spec == "G":
+        if no_pad:
+            ret str(iso_year)
+        ret text.year_text(iso_year)
+    if spec == "g":
+        ret num(civil.floor_mod(iso_year, 100), 2, no_pad)
+    ret num(week, 2, no_pad)
+
+fn time_spec(f: Fields, spec: str, no_pad: bool, digits: int) -> str:
+    if spec == "H":
+        ret num(f.hour, 2, no_pad)
+    if spec == "I":
+        h = f.hour % 12
+        if h == 0:
+            h = 12
+        ret num(h, 2, no_pad)
+    if spec == "M":
+        ret num(f.minute, 2, no_pad)
+    if spec == "S":
+        ret num(f.second, 2, no_pad)
+    if spec == "p" or spec == "P":
+        out = "AM"
+        if f.hour >= 12:
+            out = "PM"
+        if spec == "P":
+            ret out.lower()
+        ret out
+    ret text.pad(f.nanosecond, 9)[:digits]
+
+fn sample() -> Fields:
+    f = empty("OffsetDateTime")
+    f.has_date = true
+    f.has_time = true
+    f.has_offset = true
+    f.year = 2026
+    f.month = 11
+    f.day = 6
+    f.hour = 19
+    f.minute = 3
+    f.second = 31
+    f.nanosecond = 123456789
+    f.offset = -21600
+    ret f
+
+test "dates":
+    f = sample()
+    assert strftime(f, "%Y-%m-%d") == ok("2026-11-06")
+    assert strftime(f, "%F") == ok("2026-11-06")
+    assert strftime(f, "%C %y %j") == ok("20 26 310")
+    assert strftime(f, "%a %A %b %B %h") == ok("Fri Friday Nov November Nov")
+    assert strftime(f, "%u %w %V %G %g") == ok("5 5 45 2026 26")
+    assert strftime(f, "%U %W") == ok("44 44")
+    assert strftime(f, "%D") == ok("11/06/26")
+
+test "padding":
+    f = sample()
+    f.month = 3
+    f.day = 7
+    assert strftime(f, "%e|%-d|%-m|%d") == ok(" 7|7|3|07")
+    f.year = 33
+    assert strftime(f, "%Y %-Y") == ok("0033 33")
+    f.year = -44
+    assert strftime(f, "%Y %C %y") == ok("-0044 -01 56")
+
+test "times":
+    f = sample()
+    assert strftime(f, "%H:%M:%S") == ok("19:03:31")
+    assert strftime(f, "%T %R") == ok("19:03:31 19:03")
+    assert strftime(f, "%I %p %P %-I") == ok("07 PM pm 7")
+    assert strftime(f, "%f %3f %6f %9f") == ok("123456789 123 123456 123456789")
+    f.hour = 0
+    assert strftime(f, "%I %p") == ok("12 AM")
+    f.hour = 12
+    assert strftime(f, "%I %p") == ok("12 PM")
+
+test "offsets and unix time":
+    f = sample()
+    assert strftime(f, "%z %:z %Z") == ok("-0600 -06:00 -06:00")
+    f.offset = 0
+    assert strftime(f, "%z %Z") == ok("+0000 UTC")
+    f.year = 1970
+    f.month = 1
+    f.day = 1
+    f.hour = 0
+    f.minute = 0
+    f.second = 1
+    f.offset = 3600
+    assert strftime(f, "%s") == ok("-3599")
+
+test "literals and escapes":
+    f = sample()
+    assert strftime(f, "100%% on %d, ñ") == ok("100% on 06, ñ")
+    assert strftime(f, "a%nb%tc") == ok("a\nb\tc")
+    assert strftime(f, "") == ok("")
+    assert strftime(f, "%c") == ok("Fri Nov  6 19:03:31 2026")
+
+test "errors":
+    f = sample()
+    f.has_time = false
+    f.has_offset = false
+    f.kind = "Date"
+    assert strftime(f, "%H") == err("'%H' needs a time, which a Date does not have")
+    assert strftime(f, "%Q") == err("unknown format specifier '%Q'")
+    assert strftime(f, "50%") == err("format pattern '50%' ends with a lone '%'")
+    assert strftime(f, "%z") == err("'%z' needs an offset, which a Date does not have")

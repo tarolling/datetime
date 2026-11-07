@@ -1,0 +1,140 @@
+// Text helpers for formatting and parsing: zero padding, month and weekday names, and reading
+// digits. Internal to the datetime package.
+
+use internal.civil
+
+// `n` written in decimal with zeros in front to at least `width` digits, and a `-` in front of
+// that if it is negative, so `pad(7, 2)` is "07" and `pad(-7, 3)` is "-007".
+pub fn pad(n: int, width: int) -> str:
+    if n < 0:
+        // -n of the smallest int is itself, so write it from its last digit up.
+        ret "-" + pad_digits(str(n)[1:], width)
+    ret pad_digits(str(n), width)
+
+fn pad_digits(digits: str, width: int) -> str:
+    out = digits
+    while out.len() < width:
+        out = "0" + out
+    ret out
+
+// `n` with spaces in front to at least `width` characters, as strftime's `%e` writes the day.
+pub fn pad_space(n: int, width: int) -> str:
+    out = str(n)
+    while out.len() < width:
+        out = " " + out
+    ret out
+
+// A year as ISO 8601 writes it: four digits for 0 to 9999, and otherwise a sign and at least
+// four digits, as in "+10000" and "-0044".
+pub fn year_text(year: int) -> str:
+    if year > 9999:
+        ret "+" + str(year)
+    ret pad(year, 4)
+
+// The nanoseconds of a second as a fraction after the point, with only as many groups of three
+// digits as it needs: "" for 0, ".5" never, but ".500", ".000250", or ".000000001".
+pub fn fraction_text(nanos: int) -> str:
+    if nanos == 0:
+        ret ""
+    if nanos % 1000000 == 0:
+        ret "." + pad(nanos / 1000000, 3)
+    if nanos % 1000 == 0:
+        ret "." + pad(nanos / 1000, 6)
+    ret "." + pad(nanos, 9)
+
+// The fraction with its trailing zeros dropped, as ".5" for half a second, for durations.
+pub fn short_fraction_text(nanos: int) -> str:
+    if nanos == 0:
+        ret ""
+    digits = pad(nanos, 9)
+    while digits.endswith("0"):
+        digits = digits[:digits.len() - 1]
+    ret "." + digits
+
+// An offset from UTC in seconds as "+hh:mm", or "+hh:mm:ss" if it has seconds. With `colon`
+// false it is "+hhmm" or "+hhmmss" instead.
+pub fn offset_text(seconds: int, colon: bool) -> str:
+    sign = "+"
+    if seconds < 0:
+        sign = "-"
+    s = civil.abs(seconds)
+    sep = ""
+    if colon:
+        sep = ":"
+    out = sign + pad(s / 3600, 2) + sep + pad(s / 60 % 60, 2)
+    if s % 60 != 0:
+        out = out + sep + pad(s % 60, 2)
+    ret out
+
+pub fn month_name(month: int) -> str:
+    names = "January February March April May June July August September October November December"
+    ret names.split(" ")[month - 1]
+
+pub fn month_abbr(month: int) -> str:
+    ret month_name(month)[:3]
+
+// The name of an ISO weekday, 1 for Monday through 7 for Sunday.
+pub fn weekday_name(weekday: int) -> str:
+    names = "Monday Tuesday Wednesday Thursday Friday Saturday Sunday"
+    ret names.split(" ")[weekday - 1]
+
+pub fn weekday_abbr(weekday: int) -> str:
+    ret weekday_name(weekday)[:3]
+
+// The characters of a string, one string each, so a parser can index them without cutting a
+// character in two.
+pub fn chars(s: str) -> list[str]:
+    out = []
+    for c in s:
+        out.append(c)
+    ret out
+
+pub fn is_digit(c: str) -> bool:
+    ret c.len() == 1 and c >= "0" and c <= "9"
+
+pub fn digit_value(c: str) -> int:
+    ret c.bytes()[0] - 48
+
+test "zero padding":
+    assert pad(7, 2) == "07"
+    assert pad(123, 2) == "123"
+    assert pad(0, 4) == "0000"
+    assert pad(-7, 3) == "-007"
+    assert pad(-9223372036854775807 - 1, 2) == "-9223372036854775808"
+    assert pad_space(6, 2) == " 6"
+    assert pad_space(16, 2) == "16"
+
+test "years":
+    assert year_text(2026) == "2026"
+    assert year_text(33) == "0033"
+    assert year_text(0) == "0000"
+    assert year_text(-44) == "-0044"
+    assert year_text(10000) == "+10000"
+    assert year_text(-12345) == "-12345"
+
+test "fractions":
+    assert fraction_text(0) == ""
+    assert fraction_text(500000000) == ".500"
+    assert fraction_text(250000) == ".000250"
+    assert fraction_text(1) == ".000000001"
+    assert short_fraction_text(500000000) == ".5"
+    assert short_fraction_text(1) == ".000000001"
+    assert short_fraction_text(0) == ""
+
+test "offsets":
+    assert offset_text(0, true) == "+00:00"
+    assert offset_text(19800, true) == "+05:30"
+    assert offset_text(-21600, false) == "-0600"
+    assert offset_text(-3723, true) == "-01:02:03"
+
+test "names":
+    assert month_name(1) == "January"
+    assert month_abbr(9) == "Sep"
+    assert weekday_name(7) == "Sunday"
+    assert weekday_abbr(3) == "Wed"
+
+test "characters and digits":
+    assert chars("añ") == ["a", "ñ"]
+    assert is_digit("0") and is_digit("9")
+    assert not is_digit("a") and not is_digit("ñ")
+    assert digit_value("7") == 7
