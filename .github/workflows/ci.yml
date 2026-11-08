@@ -5,53 +5,60 @@ on:
     branches: [main]
   pull_request:
 
-# The oldest stone this package supports, which `stone = "0.4"` in stone.toml promises.
-env:
-  STONE_VERSION: v0.4.4
-
+# Diagnostic run: compiled lib.stn tests crash with a signal on macOS (aarch64) under stone
+# 0.4.4. This compares 0.4.3 and 0.4.4 there and gets a backtrace from a small program.
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, stone ${{ matrix.stone }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: [macos-latest]
+        stone: [v0.4.3, v0.4.4]
     runs-on: ${{ matrix.os }}
+    env:
+      STONE_VERSION: ${{ matrix.stone }}
     steps:
       - uses: actions/checkout@v4.4.0
 
-      - name: Install stone (Linux, macOS)
-        if: runner.os != 'Windows'
+      - name: Install stone
         run: |
           curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh -s -- --dir "$HOME/.stone/bin"
           echo "$HOME/.stone/bin" >> "$GITHUB_PATH"
 
-      - name: Install stone (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $env:STONE_INSTALL_DIR = "$HOME\.stone\bin"
-          $env:STONE_NO_MODIFY_PATH = "1"
-          irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex
-          "$HOME\.stone\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-
       - run: stone --version
 
-      - name: Check formatting
-        if: runner.os == 'Linux'
-        run: stone fmt --check
-
       - name: Test (interpreter)
+        continue-on-error: true
         run: stone test
 
       - name: Test (native code)
+        continue-on-error: true
         run: stone test --build
 
-      - name: Run the tour, interpreted and compiled
-        if: runner.os != 'Windows'
+      - name: Build and run small programs
+        continue-on-error: true
         working-directory: examples
         run: |
-          stone run tour.stn | sed '$d' > run.txt
-          stone build tour.stn
-          ./build/tour | sed '$d' > build.txt
-          diff run.txt build.txt
+          cat > date.stn <<'EOF'
+          use datetime.Date
+          print(Date.of(2026, 11, 6).unwrap())
+          EOF
+          cat > zone.stn <<'EOF'
+          use datetime.TimeZone
+          print(TimeZone.get("America/Chicago").unwrap().name)
+          EOF
+          for p in date zone tour; do
+            echo "== $p"
+            stone build $p.stn
+            ./build/$p; echo "exit status $?"
+          done
+
+      - name: Backtraces
+        continue-on-error: true
+        working-directory: examples
+        run: |
+          for p in date tour; do
+            echo "== $p"
+            lldb --batch -o run -o bt -o "register read pc lr sp" -o "disassemble --pc --count 12" ./build/$p || true
+          done
