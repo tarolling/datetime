@@ -141,3 +141,17 @@ jobs:
           nm build/repro | grep " b g\."
           off=$(otool -l build/repro | awk '/segname __LINKEDIT/{f=1} f&&/fileoff/{print $2; exit}')
           echo "__LINKEDIT fileoff $off"; xxd -s $off -l 48 build/repro
+
+      - name: LINKEDIT size sweep
+        continue-on-error: true
+        working-directory: repro
+        run: |
+          for nf in 0 50 100 200 400; do
+            for k in 15900 16000 16100; do
+              python3 -I gen2.py $k $nf
+              stone build big${k}_$nf.stn > /dev/null
+              if out=$(./build/big${k}_$nf 2>&1); then status=0; else status=$?; fi
+              printf 'nf=%-4s k=%-6s exit=%-4s %s\n' "$nf" "$k" "$status" "$(echo "$out" | head -1)"
+              python3 -I macho.py build/big${k}_$nf | sed 's/^/    /'
+            done
+          done
