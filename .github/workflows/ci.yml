@@ -48,5 +48,5 @@ jobs:
           line=$(grep -n '^test "building dates":' lib.stn | cut -d: -f1)
           echo "STONE_TEST=test.$line.1"
           STONE_TEST="test.$line.1" ./build/test/lib || echo "exit status $?"
-          lldb --batch -o "process launch -v STONE_TEST=test.$line.1" -o "bt 30" \
-            -o "register read" -o "disassemble --pc --count 24" -o "image list" ./build/test/lib || true
+          STONE_TEST="test.$line.1" lldb --batch -o run -k "bt 30" -k "register read" \
+            -k "disassemble --pc --count 24" -k "disassemble --start-address \$lr --count 8" ./build/test/lib || true
