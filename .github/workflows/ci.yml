@@ -90,3 +90,15 @@ jobs:
             printf 'N=%-5s exit=%-4s %s\n' "$n" "$status" "$(echo "$out" | head -1)"
             python3 -I macho.py build/globs$n
           done
+
+      - name: Minimal repro, one long string literal
+        continue-on-error: true
+        working-directory: repro
+        run: |
+          for k in 15000 16100 16300 17000; do
+            python3 -I -c "import sys; k=int(sys.argv[1]); open(f'lit{k}.stn','w').write('big = \"' + 'x'*k + '\"\nprint(big.len())\n')" $k
+            stone build lit$k.stn > /dev/null
+            if out=$(./build/lit$k 2>&1); then status=0; else status=$?; fi
+            printf 'k=%-6s exit=%-4s %s\n' "$k" "$status" "$(echo "$out" | head -1)"
+            python3 -I macho.py build/lit$k
+          done
