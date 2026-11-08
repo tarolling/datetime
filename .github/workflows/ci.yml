@@ -123,3 +123,21 @@ jobs:
             lldb --batch -o run -k "bt 20" -k "register read x0 x1 x2 x8 x9 x10 x11 x16 x17 lr pc" \
               -k "disassemble --pc --count 8" -k "memory region \$pc" ./build/globs$first || true
           fi
+
+      - name: Two-global repro
+        continue-on-error: true
+        working-directory: repro
+        run: |
+          for k in 16000 16100 16200 16250; do
+            python3 -I -c "import sys; k=int(sys.argv[1]); open(f'two{k}.stn','w').write('pad = \"' + 'x'*k + '\"\ns = \"hello\"\nprint(s, pad.len())\n')" $k
+            stone build two$k.stn > /dev/null
+            if out=$(./build/two$k 2>&1); then status=0; else status=$?; fi
+            printf 'k=%-6s exit=%-4s %s\n' "$k" "$status" "$(echo "$out" | head -1)"
+          done
+          python3 -I -c "import sys; k=16100; open('repro.stn','w').write('pad = \"' + 'x'*k + '\"\ns = \"hello\"\nprint(s, pad.len())\n')"
+          stone build repro.stn > /dev/null
+          lldb --batch -o run -k "bt 5" -k "register read x1 pc" -k "disassemble --pc --count 3" ./build/repro || true
+          python3 -I macho.py build/repro
+          nm build/repro | grep " b g\."
+          off=$(otool -l build/repro | awk '/segname __LINKEDIT/{f=1} f&&/fileoff/{print $2; exit}')
+          echo "__LINKEDIT fileoff $off"; xxd -s $off -l 48 build/repro
