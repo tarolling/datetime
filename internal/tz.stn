@@ -1,0 +1,616 @@
+// Time zone rules: reading TZif files (RFC 8536) and POSIX TZ strings, finding the offset at an
+// instant, and finding the offsets a local date and time can have. Internal to the datetime
+// package: it works on plain ints and strings, and `lib.stn` wraps it in `TimeZone`.
+//
+// Instants are seconds from 1970-01-01T00:00:00Z, local times are seconds from
+// 1970-01-01T00:00:00 on the local clock, and offsets are seconds east of UTC.
+
+use fs
+use os
+use internal.civil
+use internal.parse
+use internal.text
+
+// The day of the year a POSIX rule changes on.
+pub enum RuleDay:
+    // `Jn`: day 1 to 365, never counting February 29, so day 60 is always March 1.
+    Julian(day: int)
+    // `n`: day 0 to 365, counting February 29.
+    ZeroBased(day: int)
+    // `Mm.w.d`: weekday `weekday` (0 for Sunday) of week `week` (1 to 5, 5 for the last) of `month`.
+    Month(month: int, week: int, weekday: int)
+
+// A change: on `day`, at `time` seconds after local midnight, which may be negative or past 24
+// hours.
+pub struct Rule:
+    day: RuleDay
+    time: int
+
+// Daylight saving time in a POSIX TZ string: its abbreviation and offset, and when it starts (in
+// local standard time) and ends (in local daylight time) each year.
+pub struct Dst:
+    abbr: str
+    offset: int
+    start: Rule
+    end: Rule
+
+// A POSIX TZ string, as "CST6CDT,M3.2.0,M11.1.0".
+pub struct Posix:
+    std_abbr: str
+    std_offset: int
+    dst: option[Dst]
+
+// A zone's rules: the instants its offset changes, the local time type in effect from each, and
+// a POSIX rule for instants after the last change.
+pub struct Rules:
+    times: list[int]
+    kinds: list[int]
+    offsets: list[int]
+    dsts: list[bool]
+    abbrs: list[str]
+    footer: option[Posix]
+
+// Rules with one offset at every instant.
+pub fn fixed(offset: int, abbr: str) -> Rules:
+    ret Rules(times=[], kinds=[], offsets=[offset], dsts=[false], abbrs=[abbr], footer=none)
+
+// The rules of a POSIX TZ string alone.
+pub fn from_posix(p: Posix) -> Rules:
+    ret Rules(times=[], kinds=[], offsets=[p.std_offset], dsts=[false], abbrs=[p.std_abbr], footer=some(p))
+
+// ---------------------------------------------------------------------------------------------
+// Offsets at an instant and for a local time
+
+// The (offset, is daylight time, abbreviation) at instant `t`.
+pub fn info_at(r: Rules, t: int) -> tuple[int, bool, str]:
+    n = r.times.len()
+    if n == 0 or t >= r.times[n - 1]:
+        match r.footer:
+            case some(p):
+                ret posix_info(p, t)
+            case none:
+                if n == 0:
+                    ret (r.offsets[0], r.dsts[0], r.abbrs[0])
+    if t < r.times[0]:
+        // Before the first change, the first local time type is in effect (RFC 8536 3.2).
+        ret (r.offsets[0], r.dsts[0], r.abbrs[0])
+    // The last change at or before `t`.
+    lo = 0
+    hi = n - 1
+    while lo < hi:
+        mid = (lo + hi + 1) / 2
+        if r.times[mid] <= t:
+            lo = mid
+        else:
+            hi = mid - 1
+    k = r.kinds[lo]
+    ret (r.offsets[k], r.dsts[k], r.abbrs[k])
+
+pub fn offset_at(r: Rules, t: int) -> int:
+    o, _dst, _abbr = info_at(r, t)
+    ret o
+
+// The offsets local time `local` can have, as (count, first, second):
+//
+// - (1, o, o) for one, the usual case;
+// - (2, earlier, later) when the clock repeats it, `earlier` being the offset of the earlier
+//   instant;
+// - (0, before, after) when the clock skips it, with the offsets before and after the gap.
+pub fn local_offsets(r: Rules, local: int) -> tuple[int, int, int]:
+    before = offset_at(r, local - 86400)
+    after = offset_at(r, local + 86400)
+    matches = []
+    for o in [before, after, offset_at(r, local - before), offset_at(r, local - after)]:
+        if o not in matches and offset_at(r, local - o) == o:
+            matches.append(o)
+    if matches.len() == 0:
+        ret (0, before, after)
+    matches.sort()
+    if matches.len() == 1:
+        ret (1, matches[0], matches[0])
+    // The larger offset names the earlier instant.
+    ret (2, matches[-1], matches[0])
+
+// The local time of `rule` in `year`, in seconds from 1970-01-01T00:00:00.
+pub fn rule_local(rule: Rule, year: int) -> int:
+    days = 0
+    match rule.day:
+        case RuleDay.Julian(day):
+            days = civil.days_from_civil(year, 1, 1) + day - 1
+            if civil.is_leap_year(year) and day >= 60:
+                days += 1
+        case RuleDay.ZeroBased(day):
+            days = civil.days_from_civil(year, 1, 1) + day
+        case RuleDay.Month(month, week, weekday):
+            first = civil.days_from_civil(year, month, 1)
+            // civil counts Monday as 1 and Sunday as 7; POSIX counts Sunday as 0.
+            first_weekday = civil.weekday_from_days(first) % 7
+            day = 1 + (weekday - first_weekday + 7) % 7 + (week - 1) * 7
+            if day > civil.days_in_month(year, month):
+                day -= 7
+            days = first + day - 1
+    ret days * 86400 + rule.time
+
+fn posix_info(p: Posix, t: int) -> tuple[int, bool, str]:
+    match p.dst:
+        case none:
+            ret (p.std_offset, false, p.std_abbr)
+        case some(d):
+            y, _m, _d = civil.civil_from_days(civil.floor_div(t + p.std_offset, 86400))
+            // The latest start or end at or before `t`, from the years around it. A start wins a
+            // tie, so a rule that ends DST when it starts again keeps DST all year.
+            best = 0
+            in_dst = false
+            found = false
+            for year in [y - 1, y, y + 1]:
+                start = rule_local(d.start, year) - p.std_offset
+                end = rule_local(d.end, year) - d.offset
+                if end <= t and (not found or end > best):
+                    best = end
+                    in_dst = false
+                    found = true
+                if start <= t and (not found or start >= best):
+                    best = start
+                    in_dst = true
+                    found = true
+            if in_dst:
+                ret (d.offset, true, d.abbr)
+            ret (p.std_offset, false, p.std_abbr)
+
+// ---------------------------------------------------------------------------------------------
+// POSIX TZ strings
+
+// Reads a POSIX TZ string, with RFC 8536's extensions: a rule's time may be negative or up to
+// 167 hours. Daylight time without rules starts on the second Sunday of March and ends on the
+// first Sunday of November, at 02:00, as in the United States.
+pub fn read_posix(spec: str) -> result[Posix, str]:
+    cs = text.chars(spec)
+    std_abbr, i = posix_name(cs, 0)?
+    std, i = posix_hms(cs, i, 24)?
+    std_offset = -std
+    if i >= cs.len():
+        ret ok(Posix(std_abbr=std_abbr, std_offset=std_offset, dst=none))
+    dst_abbr, i = posix_name(cs, i)?
+    dst_offset = std_offset + 3600
+    if i < cs.len() and cs[i] != ",":
+        o, j = posix_hms(cs, i, 24)?
+        dst_offset = -o
+        i = j
+    start = Rule(day=RuleDay.Month(month=3, week=2, weekday=0), time=7200)
+    end = Rule(day=RuleDay.Month(month=11, week=1, weekday=0), time=7200)
+    if i < cs.len():
+        i = expect(cs, i, ",")?
+        start, i = posix_rule(cs, i)?
+        i = expect(cs, i, ",")?
+        end, i = posix_rule(cs, i)?
+        if i < cs.len():
+            ret err("unexpected '{cs[i]}' at position {i}")
+    ret ok(Posix(std_abbr=std_abbr, std_offset=std_offset, dst=some(Dst(abbr=dst_abbr, offset=dst_offset, start=start, end=end))))
+
+fn expect(cs: list[str], i: int, c: str) -> result[int, str]:
+    if i >= cs.len() or cs[i] != c:
+        ret err("expected '{c}' at position {i}")
+    ret ok(i + 1)
+
+fn is_letter(c: str) -> bool:
+    ret (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+
+// An abbreviation: three or more letters, or anything of letters, digits, `+`, and `-` in `<>`.
+fn posix_name(cs: list[str], i: int) -> result[tuple[str, int], str]:
+    out = ""
+    j = i
+    if j < cs.len() and cs[j] == "<":
+        j += 1
+        while j < cs.len() and cs[j] != ">":
+            c = cs[j]
+            if not (is_letter(c) or text.is_digit(c) or c == "+" or c == "-"):
+                ret err("unexpected '{c}' in a time zone abbreviation at position {j}")
+            out += c
+            j += 1
+        if j >= cs.len():
+            ret err("expected '>' after the time zone abbreviation at position {i}")
+        j += 1
+    else:
+        while j < cs.len() and is_letter(cs[j]):
+            out += cs[j]
+            j += 1
+    if out.len() < 3:
+        ret err("expected a time zone abbreviation of at least 3 characters at position {i}")
+    ret ok((out, j))
+
+// `[+-]hh[:mm[:ss]]`, with hours from 0 to `max_hours`, in seconds.
+fn posix_hms(cs: list[str], i: int, max_hours: int) -> result[tuple[int, int], str]:
+    sign = 1
+    j = i
+    if j < cs.len() and (cs[j] == "+" or cs[j] == "-"):
+        if cs[j] == "-":
+            sign = -1
+        j += 1
+    h, j = parse.digits(cs, j, 1, 3)?
+    if h > max_hours:
+        ret err("hour {h} is out of range (0 to {max_hours}) at position {i}")
+    total = h * 3600
+    for unit in [60, 1]:
+        if j < cs.len() and cs[j] == ":":
+            v, k = parse.digits(cs, j + 1, 2, 2)?
+            if v > 59:
+                ret err("{v} is out of range (0 to 59) at position {j + 1}")
+            total += v * unit
+            j = k
+        else:
+            break
+    ret ok((sign * total, j))
+
+// `Jn`, `n`, or `Mm.w.d`, then an optional `/time`.
+fn posix_rule(cs: list[str], i: int) -> result[tuple[Rule, int], str]:
+    day = RuleDay.ZeroBased(day=0)
+    j = i
+    if j < cs.len() and cs[j] == "J":
+        n, k = parse.digits(cs, j + 1, 1, 3)?
+        if n < 1 or n > 365:
+            ret err("day {n} is out of range (1 to 365) at position {j + 1}")
+        day = RuleDay.Julian(day=n)
+        j = k
+    elif j < cs.len() and cs[j] == "M":
+        m, k = parse.digits(cs, j + 1, 1, 2)?
+        k = expect(cs, k, ".")?
+        w, k = parse.digits(cs, k, 1, 1)?
+        k = expect(cs, k, ".")?
+        d, k = parse.digits(cs, k, 1, 1)?
+        if m < 1 or m > 12 or w < 1 or w > 5 or d > 6:
+            ret err("rule 'M{m}.{w}.{d}' is out of range at position {j}")
+        day = RuleDay.Month(month=m, week=w, weekday=d)
+        j = k
+    else:
+        n, k = parse.digits(cs, j, 1, 3)?
+        if n > 365:
+            ret err("day {n} is out of range (0 to 365) at position {j}")
+        day = RuleDay.ZeroBased(day=n)
+        j = k
+    time = 7200
+    if j < cs.len() and cs[j] == "/":
+        time, j = posix_hms(cs, j + 1, 167)?
+    ret ok((Rule(day=day, time=time), j))
+
+// ---------------------------------------------------------------------------------------------
+// TZif files
+
+// The big-endian integer of `n` bytes at `pos`, signed for 4 and 8 bytes.
+fn be(data: bytes, pos: int, n: int) -> int:
+    v = 0
+    for k in range(n):
+        // For 8 bytes this wraps around to the two's complement value, as wanted.
+        v = v * 256 + data[pos + k]
+    if n == 4 and v >= 2147483648:
+        v -= 4294967296
+    ret v
+
+struct Header:
+    isutcnt: int
+    isstdcnt: int
+    leapcnt: int
+    timecnt: int
+    typecnt: int
+    charcnt: int
+
+fn header(data: bytes, pos: int) -> result[Header, str]:
+    if data.len() < pos + 44:
+        ret err("the file ends inside its header")
+    if data[pos] != 84 or data[pos + 1] != 90 or data[pos + 2] != 105 or data[pos + 3] != 102:
+        ret err("not a TZif file")
+    h = Header(isutcnt=be(data, pos + 20, 4), isstdcnt=be(data, pos + 24, 4), leapcnt=be(data, pos + 28, 4), timecnt=be(data, pos + 32, 4), typecnt=be(data, pos + 36, 4), charcnt=be(data, pos + 40, 4))
+    if h.isutcnt < 0 or h.isstdcnt < 0 or h.leapcnt < 0 or h.timecnt < 0 or h.typecnt < 1 or h.charcnt < 0:
+        ret err("the header's counts are out of range")
+    ret ok(h)
+
+fn block_size(h: Header, time_size: int) -> int:
+    ret h.timecnt * (time_size + 1) + h.typecnt * 6 + h.charcnt + h.leapcnt * (time_size + 4) + h.isstdcnt + h.isutcnt
+
+// Reads the data block after the header at `pos`, with times of `time_size` bytes.
+fn block(data: bytes, pos: int, h: Header, time_size: int) -> result[Rules, str]:
+    if h.leapcnt > 0:
+        ret err("leap-second zones (right/...) are not supported")
+    if data.len() < pos + 44 + block_size(h, time_size):
+        ret err("the file ends inside its data")
+    p = pos + 44
+    times = []
+    for k in range(h.timecnt):
+        times.append(be(data, p + k * time_size, time_size))
+    p += h.timecnt * time_size
+    kinds = []
+    for k in range(h.timecnt):
+        kind = data[p + k]
+        if kind >= h.typecnt:
+            ret err("transition {k} names local time type {kind}, of {h.typecnt}")
+        kinds.append(kind)
+    p += h.timecnt
+    chars_at = p + h.typecnt * 6
+    offsets = []
+    dsts = []
+    abbrs = []
+    for k in range(h.typecnt):
+        q = p + k * 6
+        offsets.append(be(data, q, 4))
+        dsts.append(data[q + 4] != 0)
+        idx = data[q + 5]
+        if idx >= h.charcnt:
+            ret err("local time type {k} has no abbreviation")
+        end = chars_at + idx
+        while end < chars_at + h.charcnt and data[end] != 0:
+            end += 1
+        abbrs.append(data[chars_at + idx:end].text()?)
+    ret ok(Rules(times=times, kinds=kinds, offsets=offsets, dsts=dsts, abbrs=abbrs, footer=none))
+
+// Reads a TZif file of any version. A version 2 or later file's 64-bit data and POSIX footer
+// are read, and its 32-bit data skipped.
+pub fn read_tzif(data: bytes) -> result[Rules, str]:
+    h1 = header(data, 0)?
+    if data[4] == 0:
+        ret block(data, 0, h1, 4)
+    pos = 44 + block_size(h1, 4)
+    h2 = header(data, pos)?
+    r = block(data, pos, h2, 8)?
+    f = pos + 44 + block_size(h2, 8)
+    if f >= data.len() or data[f] != 10:
+        ret err("expected a footer after the data")
+    e = f + 1
+    while e < data.len() and data[e] != 10:
+        e += 1
+    if e >= data.len():
+        ret err("the footer has no final newline")
+    footer = data[f + 1:e].text()?
+    if footer != "":
+        r.footer = some(read_posix(footer)?)
+    ret ok(r)
+
+// ---------------------------------------------------------------------------------------------
+// The system's time zone database
+
+fn valid_name(name: str) -> bool:
+    if name == "" or name.startswith("/") or name.endswith("/") or ".." in name:
+        ret false
+    for c in name:
+        if not (is_letter(c) or text.is_digit(c) or c == "/" or c == "_" or c == "+" or c == "-"):
+            ret false
+    ret true
+
+fn database() -> option[str]:
+    tzdir = os.env("TZDIR").unwrap_or("")
+    if tzdir != "":
+        ret some(tzdir)
+    for dir in ["/usr/share/zoneinfo", "/usr/lib/zoneinfo", "/usr/share/lib/zoneinfo", "/etc/zoneinfo"]:
+        if fs.exists(dir):
+            ret some(dir)
+    ret none
+
+// The rules of the zone `name`, as "America/Chicago", from the system's database: `TZDIR`, or
+// else the first of the usual directories that exists.
+pub fn load(name: str) -> result[Rules, str]:
+    if not valid_name(name):
+        ret err("'{name}' is not a time zone name")
+    match database():
+        case some(dir):
+            path = "{dir}/{name}"
+            if not fs.exists(path):
+                ret err("unknown time zone '{name}'")
+            match fs.read_bytes(path):
+                case ok(data):
+                    match read_tzif(data):
+                        case ok(r):
+                            ret ok(r)
+                        case err(e):
+                            ret err("cannot read time zone '{name}' from {path}: {e}")
+                case err(_e):
+                    ret err("unknown time zone '{name}'")
+        case none:
+            ret err("no time zone database found for '{name}' (set TZDIR to its directory)")
+
+// The zone name in a path into the database, as "America/Chicago" in
+// "/usr/share/zoneinfo/America/Chicago".
+fn name_in_path(path: str) -> option[str]:
+    match path.rfind("zoneinfo/"):
+        case some(k):
+            name = path[k + 9:]
+            if valid_name(name):
+                ret some(name)
+            ret none
+        case none:
+            ret none
+
+fn read_file(path: str) -> result[Rules, str]:
+    ret read_tzif(fs.read_bytes(path)?)
+
+// The system's local zone, as (name, rules):
+//
+// 1. `TZ`, if set: empty for UTC, a zone name, an absolute path to a TZif file, or a POSIX TZ
+//    string, with an optional `:` in front. A `TZ` that is none of these is UTC.
+// 2. `/etc/localtime`, named by where its link points, or by `/etc/timezone`.
+// 3. UTC.
+pub fn local() -> tuple[str, Rules]:
+    match os.env("TZ"):
+        case some(tz):
+            v = tz
+            if v.startswith(":"):
+                v = v[1:]
+            if v == "":
+                ret ("UTC", fixed(0, "UTC"))
+            if v.startswith("/"):
+                match read_file(v):
+                    case ok(r):
+                        ret (name_in_path(v).unwrap_or(v), r)
+                    case err(_e):
+                        ret ("UTC", fixed(0, "UTC"))
+            match load(v):
+                case ok(r):
+                    ret (v, r)
+                case err(_e):
+                    match read_posix(v):
+                        case ok(p):
+                            ret (v, from_posix(p))
+                        case err(_e2):
+                            ret ("UTC", fixed(0, "UTC"))
+        case none:
+            ret system_local()
+
+fn system_local() -> tuple[str, Rules]:
+    if not fs.exists("/etc/localtime"):
+        ret ("UTC", fixed(0, "UTC"))
+    match read_file("/etc/localtime"):
+        case ok(r):
+            ret (local_name(), r)
+        case err(_e):
+            ret ("UTC", fixed(0, "UTC"))
+
+fn local_name() -> str:
+    match os.run("readlink", ["/etc/localtime"]):
+        case ok(out):
+            if out.status == 0:
+                match name_in_path(out.stdout.strip()):
+                    case some(name):
+                        ret name
+                    case none:
+                        ret "localtime"
+        case err(_e):
+            ret "localtime"
+    if fs.exists("/etc/timezone"):
+        match fs.read("/etc/timezone"):
+            case ok(t):
+                if valid_name(t.strip()):
+                    ret t.strip()
+            case err(_e):
+                ret "localtime"
+    ret "localtime"
+
+// ---------------------------------------------------------------------------------------------
+// Tests
+
+// The bytes of `v` in `n` bytes, big-endian.
+fn be_bytes(v: int, n: int) -> list[int]:
+    out = []
+    x = v
+    for _k in range(n):
+        out.insert(0, civil.floor_mod(x, 256))
+        x = civil.floor_div(x, 256)
+    ret out
+
+// A TZif data block with a header, for a zone of LMT, CST, and CDT with three changes.
+fn sample_block(version: int, time_size: int, leapcnt: int) -> list[int]:
+    out = [84, 90, 105, 102, version]
+    for _k in range(15):
+        out.append(0)
+    chars = [76, 77, 84, 0, 67, 83, 84, 0, 67, 68, 84, 0]
+    for count in [0, 0, leapcnt, 3, 3, chars.len()]:
+        out.extend(be_bytes(count, 4))
+    for t in [-2717647200, 1772956800, 1793516400]:
+        out.extend(be_bytes(t, time_size))
+    out.extend([1, 2, 1])
+    for ty in [(-21036, 0, 0), (-21600, 0, 4), (-18000, 1, 8)]:
+        o, dst, idx = ty
+        out.extend(be_bytes(o, 4))
+        out.extend([dst, idx])
+    for b in chars:
+        out.append(b)
+    for _k in range(leapcnt):
+        out.extend(be_bytes(0, time_size + 4))
+    ret out
+
+fn sample_tzif(version: int, footer: str, leapcnt: int) -> bytes:
+    data = sample_block(version, 4, leapcnt)
+    if version != 0:
+        data.extend(sample_block(version, 8, leapcnt))
+        data.append(10)
+        for b in footer.bytes():
+            data.append(b)
+        data.append(10)
+    ret bytes(data).unwrap()
+
+fn cst() -> tuple[int, bool, str]:
+    ret (-21600, false, "CST")
+
+fn cdt() -> tuple[int, bool, str]:
+    ret (-18000, true, "CDT")
+
+test "TZif version 2 with a footer":
+    r = read_tzif(sample_tzif(50, "CST6CDT,M3.2.0,M11.1.0", 0)).unwrap()
+    assert r.times == [-2717647200, 1772956800, 1793516400]
+    assert r.abbrs == ["LMT", "CST", "CDT"]
+    assert info_at(r, -3000000000) == (-21036, false, "LMT")
+    assert info_at(r, 0) == cst()
+    assert info_at(r, 1772956799) == cst()
+    assert info_at(r, 1772956800) == cdt()
+    assert info_at(r, 1793516399) == cdt()
+    assert info_at(r, 1793516400) == cst()
+    // After the last change the footer decides: 2030-07-01 and 2030-01-01.
+    assert info_at(r, 1909094400) == cdt()
+    assert info_at(r, 1893456000) == cst()
+
+test "TZif version 1 has no footer":
+    r = read_tzif(sample_tzif(0, "", 0)).unwrap()
+    assert r.footer == none
+    assert info_at(r, 1909094400) == cst()
+
+test "TZif errors":
+    assert read_tzif(sample_tzif(50, "CST6CDT,M3.2.0,M11.1.0", 1)) == err("leap-second zones (right/...) are not supported")
+    assert read_tzif("TZxx".bytes()) == err("the file ends inside its header")
+    data = sample_tzif(50, "", 0)
+    assert read_tzif(data[:data.len() - 1]) == err("the footer has no final newline")
+    assert read_tzif(sample_tzif(0, "", 0)[:60]) == err("the file ends inside its data")
+    assert read_tzif(data[:100]) == err("the file ends inside its header")
+
+test "local times in a gap, an overlap, and neither":
+    r = read_tzif(sample_tzif(50, "CST6CDT,M3.2.0,M11.1.0", 0)).unwrap()
+    // 2026-03-08T02:30, 2026-11-01T01:30, and 2026-07-01T12:00 on the local clock.
+    assert local_offsets(r, 1772937000) == (0, -21600, -18000)
+    assert local_offsets(r, 1793496600) == (2, -18000, -21600)
+    assert local_offsets(r, 1782907200) == (1, -18000, -18000)
+    assert local_offsets(fixed(3600, "CET"), 0) == (1, 3600, 3600)
+
+test "POSIX TZ strings":
+    p = read_posix("CST6CDT,M3.2.0,M11.1.0").unwrap()
+    assert p.std_abbr == "CST" and p.std_offset == -21600
+    d = p.dst.unwrap()
+    assert d.abbr == "CDT" and d.offset == -18000
+    assert d.start == Rule(day=RuleDay.Month(month=3, week=2, weekday=0), time=7200)
+    assert read_posix("CST6CDT").unwrap() == p
+    p = read_posix("<+0330>-3:30").unwrap()
+    assert p.std_abbr == "+0330" and p.std_offset == 12600 and p.dst == none
+    p = read_posix("<-02>2<-01>,M3.5.0/-1,M10.5.0/0").unwrap()
+    assert p.dst.unwrap().start.time == -3600
+    p = read_posix("EST5EDT,0/0,J365/25").unwrap()
+    assert p.dst.unwrap().end == Rule(day=RuleDay.Julian(day=365), time=90000)
+    assert read_posix("America/Chicago").is_err()
+    assert read_posix("CS6") == err("expected a time zone abbreviation of at least 3 characters at position 0")
+    assert read_posix("CST6CDT,M3.2.0").is_err()
+    assert read_posix("CST6CDT,M13.2.0,M11.1.0").is_err()
+    assert read_posix("CST6x").is_err()
+
+test "POSIX rule days":
+    // J60 is March 1 even in a leap year; 59 counts February 29.
+    assert rule_local(Rule(day=RuleDay.Julian(day=60), time=0), 2024) == 19783 * 86400
+    assert rule_local(Rule(day=RuleDay.ZeroBased(day=59), time=0), 2024) == 19782 * 86400
+    // The second Sunday of March 2026 is March 8, and the last Sunday of October 2026 is the 25th.
+    assert rule_local(Rule(day=RuleDay.Month(month=3, week=2, weekday=0), time=7200), 2026) == civil.days_from_civil(2026, 3, 8) * 86400 + 7200
+    assert rule_local(Rule(day=RuleDay.Month(month=10, week=5, weekday=0), time=0), 2026) == civil.days_from_civil(2026, 10, 25) * 86400
+
+test "POSIX rules in both hemispheres and all year":
+    sydney = from_posix(read_posix("AEST-10AEDT,M10.1.0,M4.1.0/3").unwrap())
+    assert info_at(sydney, 1894665600) == (39600, true, "AEDT")
+    assert info_at(sydney, 1909094400) == (36000, false, "AEST")
+    // Irish time: standard time in summer, and "daylight" time, an hour behind it, in winter.
+    dublin = from_posix(read_posix("IST-1GMT0,M10.5.0,M3.5.0/1").unwrap())
+    assert info_at(dublin, 1894665600) == (0, true, "GMT")
+    assert info_at(dublin, 1909094400) == (3600, false, "IST")
+    always = from_posix(read_posix("EST5EDT,0/0,J365/25").unwrap())
+    assert info_at(always, 1894665600) == (-14400, true, "EDT")
+    assert info_at(always, 1893456000) == (-14400, true, "EDT")
+    assert info_at(always, 1909094400) == (-14400, true, "EDT")
+
+test "zone names":
+    assert valid_name("America/Argentina/Buenos_Aires")
+    assert valid_name("Etc/GMT+5")
+    assert not valid_name("../etc/passwd")
+    assert not valid_name("/usr/share/zoneinfo/UTC")
+    assert not valid_name("America/")
+    assert load("../x") == err("'../x' is not a time zone name")
+    assert name_in_path("/usr/share/zoneinfo/America/Chicago") == some("America/Chicago")
+    assert name_in_path("/etc/localtime") == none

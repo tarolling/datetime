@@ -1,8 +1,6 @@
 // Text helpers for formatting and parsing: zero padding, month and weekday names, and reading
 // digits. Internal to the datetime package.
 
-use internal.civil
-
 // `n` written in decimal with zeros in front to at least `width` digits, and a `-` in front of
 // that if it is negative, so `pad(7, 2)` is "07" and `pad(-7, 3)` is "-007".
 pub fn pad(n: int, width: int) -> str:
@@ -15,13 +13,6 @@ fn pad_digits(digits: str, width: int) -> str:
     out = digits
     while out.len() < width:
         out = "0" + out
-    ret out
-
-// `n` with spaces in front to at least `width` characters, as strftime's `%e` writes the day.
-pub fn pad_space(n: int, width: int) -> str:
-    out = str(n)
-    while out.len() < width:
-        out = " " + out
     ret out
 
 // A year as ISO 8601 writes it: four digits for 0 to 9999, and otherwise a sign and at least
@@ -37,16 +28,16 @@ pub fn fraction_text(nanos: int) -> str:
     if nanos == 0:
         ret ""
     if nanos % 1000000 == 0:
-        ret "." + pad(nanos / 1000000, 3)
+        ret ".{nanos / 1000000:03}"
     if nanos % 1000 == 0:
-        ret "." + pad(nanos / 1000, 6)
-    ret "." + pad(nanos, 9)
+        ret ".{nanos / 1000:06}"
+    ret ".{nanos:09}"
 
 // The fraction with its trailing zeros dropped, as ".5" for half a second, for durations.
 pub fn short_fraction_text(nanos: int) -> str:
     if nanos == 0:
         ret ""
-    digits = pad(nanos, 9)
+    digits = "{nanos:09}"
     while digits.endswith("0"):
         digits = digits[:digits.len() - 1]
     ret "." + digits
@@ -57,13 +48,13 @@ pub fn offset_text(seconds: int, colon: bool) -> str:
     sign = "+"
     if seconds < 0:
         sign = "-"
-    s = civil.abs(seconds)
+    s = seconds.abs()
     sep = ""
     if colon:
         sep = ":"
-    out = sign + pad(s / 3600, 2) + sep + pad(s / 60 % 60, 2)
+    out = "{sign}{s / 3600:02}{sep}{s / 60 % 60:02}"
     if s % 60 != 0:
-        out = out + sep + pad(s % 60, 2)
+        out += "{sep}{s % 60:02}"
     ret out
 
 pub fn month_name(month: int) -> str:
@@ -101,8 +92,6 @@ test "zero padding":
     assert pad(0, 4) == "0000"
     assert pad(-7, 3) == "-007"
     assert pad(-9223372036854775807 - 1, 2) == "-9223372036854775808"
-    assert pad_space(6, 2) == " 6"
-    assert pad_space(16, 2) == "16"
 
 test "years":
     assert year_text(2026) == "2026"

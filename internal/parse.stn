@@ -142,19 +142,20 @@ fn expand(pattern: str) -> list[str]:
             cont
         spec = ps[k]
         k += 1
-        long = ""
-        if spec == "F":
-            long = "Y-%m-%d"
-        elif spec == "D" or spec == "x":
-            long = "m/%d/%y"
-        elif spec == "T" or spec == "X":
-            long = "H:%M:%S"
-        elif spec == "R":
-            long = "H:%M"
-        elif spec == "c":
-            long = "a %b %e %H:%M:%S %Y"
-        else:
-            long = spec
+        long = spec
+        match spec:
+            case "F":
+                long = "Y-%m-%d"
+            case "D" | "x":
+                long = "m/%d/%y"
+            case "T" | "X":
+                long = "H:%M:%S"
+            case "R":
+                long = "H:%M"
+            case "c":
+                long = "a %b %e %H:%M:%S %Y"
+            case _:
+                long = spec
         for d in long:
             out.append(d)
     ret out
@@ -186,15 +187,16 @@ pub fn strptime(input: str, pattern: str) -> result[Parsed, str]:
             k += 1
         spec = ps[k]
         k += 1
-        if spec == "%":
-            i = expect(cs, i, "%")?
-        elif spec == "n" or spec == "t":
-            while i < cs.len() and (cs[i] == " " or cs[i] == "\t" or cs[i] == "\n" or cs[i] == "\r"):
-                i += 1
-        elif "YCyGmdejaAbBhuwVHIMSpPfzZs".contains(spec):
-            p, i = read(cs, i, spec, colon, width, p)?
-        else:
-            ret err("unknown format specifier '%{spec}'")
+        match spec:
+            case "%":
+                i = expect(cs, i, "%")?
+            case "n" | "t":
+                while i < cs.len() and (cs[i] == " " or cs[i] == "\t" or cs[i] == "\n" or cs[i] == "\r"):
+                    i += 1
+            case "Y" | "C" | "y" | "G" | "m" | "d" | "e" | "j" | "a" | "A" | "b" | "B" | "h" | "u" | "w" | "V" | "H" | "I" | "M" | "S" | "p" | "P" | "f" | "z" | "Z" | "s":
+                p, i = read(cs, i, spec, colon, width, p)?
+            case _:
+                ret err("unknown format specifier '%{spec}'")
     at_end(cs, i)?
     ret ok(p)
 
@@ -202,103 +204,105 @@ pub fn strptime(input: str, pattern: str) -> result[Parsed, str]:
 // position after it.
 fn read(cs: list[str], i: int, spec: str, colon: bool, width: int, p: Parsed) -> result[tuple[Parsed, int], str]:
     q = p
-    if spec == "Y" or spec == "G":
-        s, j = sign(cs, i)
-        max = 4
-        if s != 0:
-            max = 9
-        else:
-            s = 1
-        n, j = digits(cs, j, 1, max)?
-        if spec == "Y":
-            q.year = some(s * n)
-        else:
-            q.iso_year = some(s * n)
-        ret ok((q, j))
-    if spec == "s":
-        s, j = sign(cs, i)
-        if s == 0:
-            s = 1
-        n, j = digits(cs, j, 1, 15)?
-        q.unix = some(s * n)
-        ret ok((q, j))
-    if spec == "C" or spec == "y" or spec == "m" or spec == "d" or spec == "H" or spec == "I" or spec == "M" or spec == "S" or spec == "V":
-        n, j = digits(cs, i, 1, 2)?
-        if spec == "C":
-            q.century = some(n)
-        elif spec == "y":
-            q.year_of_century = some(n)
-        elif spec == "m":
-            q.month = some(n)
-        elif spec == "d":
+    match spec:
+        case "Y" | "G":
+            s, j = sign(cs, i)
+            max = 4
+            if s != 0:
+                max = 9
+            else:
+                s = 1
+            n, j = digits(cs, j, 1, max)?
+            if spec == "Y":
+                q.year = some(s * n)
+            else:
+                q.iso_year = some(s * n)
+            ret ok((q, j))
+        case "s":
+            s, j = sign(cs, i)
+            if s == 0:
+                s = 1
+            n, j = digits(cs, j, 1, 15)?
+            q.unix = some(s * n)
+            ret ok((q, j))
+        case "C" | "y" | "m" | "d" | "H" | "I" | "M" | "S" | "V":
+            n, j = digits(cs, i, 1, 2)?
+            match spec:
+                case "C":
+                    q.century = some(n)
+                case "y":
+                    q.year_of_century = some(n)
+                case "m":
+                    q.month = some(n)
+                case "d":
+                    q.day = some(n)
+                case "H":
+                    q.hour = some(n)
+                case "I":
+                    q.hour12 = some(n)
+                case "M":
+                    q.minute = some(n)
+                case "S":
+                    q.second = some(n)
+                case _:
+                    q.iso_week = some(n)
+            ret ok((q, j))
+        case "e":
+            j = i
+            if j < cs.len() and cs[j] == " ":
+                j += 1
+            n, j = digits(cs, j, 1, 2)?
             q.day = some(n)
-        elif spec == "H":
-            q.hour = some(n)
-        elif spec == "I":
-            q.hour12 = some(n)
-        elif spec == "M":
-            q.minute = some(n)
-        elif spec == "S":
-            q.second = some(n)
-        else:
-            q.iso_week = some(n)
-        ret ok((q, j))
-    if spec == "e":
-        j = i
-        if j < cs.len() and cs[j] == " ":
-            j += 1
-        n, j = digits(cs, j, 1, 2)?
-        q.day = some(n)
-        ret ok((q, j))
-    if spec == "j":
-        n, j = digits(cs, i, 1, 3)?
-        q.day_of_year = some(n)
-        ret ok((q, j))
-    if spec == "u" or spec == "w":
-        n, j = digits(cs, i, 1, 1)?
-        if spec == "w":
-            if n > 6:
-                ret err("weekday {n} is out of range (0 to 6) at position {i}")
-            if n == 0:
-                n = 7
-        elif n < 1 or n > 7:
-            ret err("weekday {n} is out of range (1 to 7) at position {i}")
-        q.weekday = some(n)
-        ret ok((q, j))
-    if spec == "f":
-        n = 0
-        j = i
-        if width == 0:
-            n, j = fraction(cs, i)?
-        else:
-            n, j = digits(cs, i, width, width)?
-            for _k in range(9 - width):
-                n *= 10
-        q.nanosecond = some(n)
-        ret ok((q, j))
-    if spec == "b" or spec == "B" or spec == "h":
-        k, j = name(cs, i, month_names(), "a month name")?
-        q.month = some(k % 12 + 1)
-        ret ok((q, j))
-    if spec == "a" or spec == "A":
-        k, j = name(cs, i, weekday_names(), "a weekday name")?
-        q.weekday = some(k % 7 + 1)
-        ret ok((q, j))
-    if spec == "p" or spec == "P":
-        k, j = name(cs, i, ["AM", "PM"], "AM or PM")?
-        q.pm = some(k == 1)
-        ret ok((q, j))
-    if spec == "Z":
-        k = i
-        if k + 3 <= cs.len() and ("".join(cs[k:k + 3]) == "UTC" or "".join(cs[k:k + 3]) == "GMT"):
-            q.offset = some(0)
-            ret ok((q, k + 3))
-        n, j = offset(cs, i, true)?
-        q.offset = some(n)
-        ret ok((q, j))
-    n, j = offset(cs, i, colon)?
-    q.offset = some(n)
-    ret ok((q, j))
+            ret ok((q, j))
+        case "j":
+            n, j = digits(cs, i, 1, 3)?
+            q.day_of_year = some(n)
+            ret ok((q, j))
+        case "u" | "w":
+            n, j = digits(cs, i, 1, 1)?
+            if spec == "w":
+                if n > 6:
+                    ret err("weekday {n} is out of range (0 to 6) at position {i}")
+                if n == 0:
+                    n = 7
+            elif n < 1 or n > 7:
+                ret err("weekday {n} is out of range (1 to 7) at position {i}")
+            q.weekday = some(n)
+            ret ok((q, j))
+        case "f":
+            n = 0
+            j = i
+            if width == 0:
+                n, j = fraction(cs, i)?
+            else:
+                n, j = digits(cs, i, width, width)?
+                for _k in range(9 - width):
+                    n *= 10
+            q.nanosecond = some(n)
+            ret ok((q, j))
+        case "b" | "B" | "h":
+            k, j = name(cs, i, month_names(), "a month name")?
+            q.month = some(k % 12 + 1)
+            ret ok((q, j))
+        case "a" | "A":
+            k, j = name(cs, i, weekday_names(), "a weekday name")?
+            q.weekday = some(k % 7 + 1)
+            ret ok((q, j))
+        case "p" | "P":
+            k, j = name(cs, i, ["AM", "PM"], "AM or PM")?
+            q.pm = some(k == 1)
+            ret ok((q, j))
+        case "Z":
+            if i + 3 <= cs.len() and ("".join(cs[i:i + 3]) == "UTC" or "".join(cs[i:i + 3]) == "GMT"):
+                q.offset = some(0)
+                ret ok((q, i + 3))
+            n, j = offset(cs, i, true)?
+            q.offset = some(n)
+            ret ok((q, j))
+        case _:
+            n, j = offset(cs, i, colon)?
+            q.offset = some(n)
+            ret ok((q, j))
 
 // The (year, month, day) the parts give, `none` if they give no date, or an error if they give
 // only part of one or parts that disagree.

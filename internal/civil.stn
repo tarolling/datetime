@@ -16,11 +16,6 @@ pub fn floor_div(a: int, b: int) -> int:
 pub fn floor_mod(a: int, b: int) -> int:
     ret a - floor_div(a, b) * b
 
-pub fn abs(a: int) -> int:
-    if a < 0:
-        ret -a
-    ret a
-
 pub fn is_leap_year(year: int) -> bool:
     ret floor_mod(year, 4) == 0 and (floor_mod(year, 100) != 0 or floor_mod(year, 400) == 0)
 

@@ -1,22 +1,24 @@
 # datetime
 
-Dates, times, durations, and UTC offsets for [stone](https://tarolling.github.io/stone), with
-ISO 8601 and strftime-style formatting and parsing. Written in pure stone, it runs the same in the
-interpreter and in compiled programs.
+Dates, times, durations, UTC offsets, and IANA time zones for
+[stone](https://tarolling.github.io/stone), with ISO 8601 and strftime-style formatting and
+parsing. Written in pure stone, it runs the same in the interpreter and in compiled programs.
 
 ```stone
 use datetime.Date
 use datetime.Duration
-use datetime.Offset
-use datetime.OffsetDateTime
+use datetime.Period
+use datetime.TimeZone
+use datetime.ZonedDateTime
 
-d = Date.of(2026, 1, 31).unwrap()
-print(d.add_months(1))                        // 2026-02-28
+print(Date.of(2026, 1, 31).unwrap() + Period.of_months(1))   // 2026-02-28
 
-meeting = OffsetDateTime.of(2026, 11, 6, 19, 13, 31, Offset.of_hours(-6).unwrap()).unwrap()
-print(meeting.to_utc())                       // 2026-11-07T01:13:31Z
-print(meeting.add(Duration.of_minutes(90)).format("%-I:%M %p"))   // 8:43 PM
-print(OffsetDateTime.parse_iso("2026-11-07T06:43:31+05:30").unwrap() == meeting.to_offset(Offset.of_hm(5, 30).unwrap()))   // true
+chicago = TimeZone.get("America/Chicago").unwrap()
+meeting = ZonedDateTime.of(2026, 11, 6, 19, 13, 31, chicago).unwrap()
+print(meeting)                                // 2026-11-06T19:13:31-06:00[America/Chicago]
+print(meeting.to_instant())                   // 2026-11-07T01:13:31Z
+print((meeting + Duration.of_minutes(90)).format("%-I:%M %p %Z"))   // 8:43 PM CST
+print(meeting.in_zone(TimeZone.get("Asia/Kolkata").unwrap()))      // 2026-11-07T06:43:31+05:30[Asia/Kolkata]
 ```
 
 ## Install
@@ -25,7 +27,7 @@ print(OffsetDateTime.parse_iso("2026-11-07T06:43:31+05:30").unwrap() == meeting.
 stone add github:tarolling/datetime
 ```
 
-This needs stone 0.4 or later. Then `use datetime` and write `datetime.Date`, or import each
+This needs stone 0.4.4 or later. Then `use datetime` and write `datetime.Date`, or import each
 type by name with `use datetime.Date`.
 
 ## Types
@@ -41,15 +43,39 @@ what it means:
 | `Offset` | `+05:30`, `Z` | a fixed offset from UTC, from -18:00 to +18:00 |
 | `OffsetDateTime` | `2026-11-06T19:13:31-06:00` | a date and time at an offset: one instant |
 | `Instant` | `2026-11-07T01:13:31Z` | a point in time, counted from 1970-01-01T00:00:00Z |
+| `TimeZone` | `America/Chicago` | a time zone's rules: its offset at every instant |
+| `ZonedDateTime` | `2026-11-06T19:13:31-06:00[America/Chicago]` | a date and time in a time zone: one instant |
 | `Duration` | `PT1H30M` | an exact length of time, to the nanosecond |
 | `Period` | `P1Y2M3D` | a length in years, months, and days, whose exact length depends on the date |
 | `Weekday` | `Weekday.Friday` | Monday to Sunday |
+| `LocalTime` | `LocalTime.Gap(before=-06:00, after=-05:00)` | what a wall clock time means in a zone |
+| `Disambiguation` | `Disambiguation.Compatible` | how to pick an instant for a time the clocks skip or repeat |
 
 Dates use the proleptic Gregorian calendar with a year 0 (1 BC is year 0 and 2 BC is year -1),
 for years -999999 to 999999. Times have nanosecond precision.
 
-Every type except `Period` and `Weekday` can be compared with `<`, `==`, and so on, and sorted.
-`print` and `str` write every type in ISO 8601, as in the table.
+Every type but `Period`, `TimeZone`, and the enums can be compared with `<`, `==`, and so on,
+and sorted. `print` and `str` write every type in ISO 8601, as in the table.
+
+## Operators
+
+Arithmetic uses `+`, `-`, `*`, `/`, and unary `-` (each also as a method, as `d.add(e)`):
+
+| Expression | Result |
+| --- | --- |
+| `Duration + Duration`, `Duration - Duration`, `-Duration` | `Duration`, exact |
+| `Duration * int`, `Duration / int` | `Duration`; `/` truncates toward zero to the nanosecond |
+| `Period + Period`, `Period - Period`, `-Period`, `Period * int` | `Period`, part by part |
+| `Date + Period`, `Date - Period` | `Date`: the years and months, then the days |
+| `Time + Duration`, `Time - Duration` | `Time`, going around midnight |
+| `DateTime`, `OffsetDateTime` `+ Duration` or `+ Period` (and `-`) | the same type, with the offset kept |
+| `Instant + Duration`, `Instant - Duration` | `Instant` |
+| `ZonedDateTime + Duration` (and `-`) | exact time: 24 hours across a change of the clocks is another wall clock time |
+| `ZonedDateTime + Period` (and `-`) | wall clock time: a day later is the same time of day |
+
+stone gives an operator's result the left operand's type, so the time between two values is a
+method: `a.duration_until(b)`, `i.duration_since(earlier)`, and `d.days_until(other)`. `+=` and
+`-=` work too, as in `total += Duration.of_minutes(5)`.
 
 ## Errors
 
@@ -73,14 +99,14 @@ Arguments are ints unless noted. `→ result` marks functions that return `resul
 | `Date.from_ordinal(year, day_of_year)` → result | `Date.from_ordinal(2026, 310)` is 2026-11-06 |
 | `Date.from_iso_week(iso_year, week, weekday: Weekday)` → result | a date from its ISO week |
 | `Date.from_epoch_days(n)` | the date `n` days after 1970-01-01 |
-| `Date.today_utc()` | today in UTC |
+| `Date.today_utc()`, `Date.today(zone: TimeZone)` | today in UTC, or in a zone |
 | `.year`, `.month`, `.day` | the parts |
 | `.weekday()`, `.day_of_year()`, `.iso_week()` | `Weekday.Friday`, `310`, `(2026, 45)` |
 | `.is_leap_year()`, `.days_in_month()`, `.days_in_year()` | facts about the date's year and month |
 | `.first_of_month()`, `.last_of_month()` | the month's first and last day |
 | `.add_days(n)`, `.add_weeks(n)` | `n` may be negative |
 | `.add_months(n)`, `.add_years(n)` | keeps the day, or uses the month's last day if the month is shorter |
-| `.add_period(p: Period)` | adds the years and months first, then the days |
+| `d + p`, `d - p` | adds the years and months of a `Period` first, then the days |
 | `.days_until(other: Date)` | days from this date to `other`, negative if `other` is earlier |
 | `.to_epoch_days()` | days from 1970-01-01 |
 | `.at(t: Time)` | a `DateTime` |
@@ -99,7 +125,7 @@ Free functions: `datetime.is_leap_year(year)`, `datetime.days_in_month(year, mon
 | `Time.from_seconds_of_day(n)` → result, `Time.from_nanos_of_day(n)` → result | the time `n` after midnight |
 | `.hour`, `.minute`, `.second`, `.nanosecond` | the parts |
 | `.seconds_of_day()`, `.nanos_of_day()` | the time since midnight |
-| `.add(d: Duration)`, `.sub(d: Duration)` | goes around midnight as a clock does |
+| `t + d`, `t - d` | a `Duration` later or earlier, going around midnight as a clock does |
 | `.duration_until(other: Time)` | on the same day, negative if `other` is earlier |
 | `.format`, `Time.parse`, `Time.parse_iso` | |
 
@@ -109,12 +135,13 @@ Free functions: `datetime.is_leap_year(year)`, `datetime.days_in_month(year, mon
 | --- | --- |
 | `DateTime.of(year, month, day, hour, minute, second)` → result | |
 | `DateTime.new(date: Date, time: Time)`, `date.at(time)` | |
-| `DateTime.now_utc()` | now, in UTC |
+| `DateTime.now_utc()`, `DateTime.now(zone: TimeZone)` | now, in UTC or on a zone's clocks |
 | `.date`, `.time` | the parts |
-| `.add(d: Duration)`, `.sub(d: Duration)`, `.add_days(n)`, `.add_period(p: Period)` | |
+| `dt + d`, `dt + p`, `dt - d`, `dt - p`, `.add_days(n)` | with a `Duration` or a `Period` |
 | `.duration_until(other: DateTime)` | |
 | `.at_offset(o: Offset)` | an `OffsetDateTime` |
 | `.assume_utc()` | the `Instant` this names in UTC |
+| `.in_zone(z: TimeZone)` | a `ZonedDateTime`, as `ZonedDateTime.new` resolves it |
 | `.format`, `DateTime.parse`, `DateTime.parse_iso` | |
 
 ### Offset
@@ -136,7 +163,8 @@ Free functions: `datetime.is_leap_year(year)`, `datetime.days_in_month(year, mon
 | `OffsetDateTime.from_instant(i: Instant, o: Offset)`, `i.at_offset(o)` | |
 | `.datetime`, `.offset`, `.date()`, `.time()` | the parts |
 | `.to_instant()`, `.to_offset(o: Offset)`, `.to_utc()` | the same instant, maybe at another offset |
-| `.add(d)`, `.sub(d)`, `.add_period(p)` | keep the offset |
+| `.in_zone(z: TimeZone)` | the same instant in a zone |
+| `odt + d`, `odt + p`, `odt - d`, `odt - p` | keep the offset |
 | `.duration_until(other: OffsetDateTime)` | between the two instants |
 | `.format`, `OffsetDateTime.parse`, `OffsetDateTime.parse_iso` | `parse_iso` reads RFC 3339 |
 
@@ -151,8 +179,9 @@ ask whether two values are the same instant. `<` orders by instant first.
 | `Instant.from_unix(s)`, `.from_unix_millis(ms)`, `.from_unix_micros(us)`, `.from_unix_nanos(ns)` | |
 | `.unix_seconds()`, `.unix_millis()`, `.unix_micros()`, `.unix_nanos()` | rounded down, so they are negative before 1970 |
 | `.secs`, `.nanos` | the seconds since 1970, and nanoseconds from 0 to 999999999 |
-| `.add(d)`, `.sub(d)`, `.duration_since(earlier: Instant)`, `.elapsed()` | |
+| `i + d`, `i - d`, `.duration_since(earlier: Instant)`, `.elapsed()` | |
 | `.at_offset(o: Offset)`, `.to_utc()` | an `OffsetDateTime` |
+| `.in_zone(z: TimeZone)` | a `ZonedDateTime` |
 | `.format` (in UTC), `Instant.parse`, `Instant.parse_iso` | |
 
 ### Duration
@@ -162,7 +191,7 @@ ask whether two values are the same instant. `<` orders by instant first.
 | `Duration.zero()`, `Duration.of_days(n)`, `of_hours`, `of_minutes`, `of_seconds`, `of_millis`, `of_micros`, `of_nanos` | a day is exactly 24 hours |
 | `Duration.of_seconds_float(x: float)` | |
 | `.secs`, `.nanos` | seconds, rounded down, and nanoseconds from 0 to 999999999: -1.5 s is secs -2, nanos 500000000 |
-| `.add(d)`, `.sub(d)`, `.neg()`, `.abs()`, `.mul(k)`, `.div(k)` | exact. `div` truncates toward zero to the nanosecond |
+| `a + b`, `a - b`, `-a`, `a * k`, `a / k`, `.abs()` | exact. `/` truncates toward zero to the nanosecond |
 | `.whole_days()`, `whole_hours`, `whole_minutes`, `whole_seconds`, `whole_millis`, `whole_micros`, `whole_nanos` | truncated toward zero |
 | `.as_seconds_float()` | |
 | `.is_zero()`, `.is_negative()` | |
@@ -174,8 +203,71 @@ ask whether two values are the same instant. `<` orders by instant first.
 | --- | --- |
 | `Period.of(years, months, days)`, `Period.zero()`, `of_years`, `of_months`, `of_weeks`, `of_days` | |
 | `.years`, `.months`, `.days` | |
-| `.add(p)`, `.neg()`, `.is_zero()` | |
+| `a + b`, `a - b`, `-a`, `a * k`, `.is_zero()` | part by part, without carrying months into years |
 | `Period.parse_iso(text)` → result | `P1Y2M3D`, `P2W`, `-P1M`, `P1Y-2M` |
+
+### TimeZone
+
+| | |
+| --- | --- |
+| `TimeZone.get(name)` → result | `"America/Chicago"` and any other IANA zone, `"UTC"`, `"+05:30"`, or `"localtime"` |
+| `TimeZone.local()` | the system's zone; see below |
+| `TimeZone.utc()`, `TimeZone.fixed(o: Offset)` | |
+| `TimeZone.posix(spec)` → result | a POSIX TZ string, as `"CST6CDT,M3.2.0,M11.1.0"` |
+| `TimeZone.from_tzif(name, data: bytes)` → result | a TZif file (RFC 8536), such as one from `/usr/share/zoneinfo` |
+| `.name` | |
+| `.offset_at(i: Instant)`, `.abbreviation_at(i)`, `.is_dst_at(i)` | `-06:00`, `"CST"`, `false` |
+| `.resolve(dt: DateTime)` | a `LocalTime`: what the wall clock time means here |
+
+`get` reads the zone from the system's copy of the IANA database: the directory `TZDIR` names,
+or else the first of `/usr/share/zoneinfo`, `/usr/lib/zoneinfo`, `/usr/share/lib/zoneinfo`, and
+`/etc/zoneinfo`. It reads the file each time, so get a zone once and reuse it. `local` uses `TZ`
+if it is set (a zone name, a path to a TZif file, or a POSIX TZ string), and then
+`/etc/localtime`, which it names by where the link points. It falls back to UTC.
+
+### LocalTime and Disambiguation
+
+When the clocks go forward an hour, the wall clock times in that hour never happen. When they go
+back, the times in that hour happen twice. `zone.resolve(dt)` says which case applies:
+
+```stone
+pub enum LocalTime:
+    Unique(at: OffsetDateTime)
+    Ambiguous(earlier: OffsetDateTime, later: OffsetDateTime)
+    Gap(before: Offset, after: Offset)
+```
+
+`ZonedDateTime.from_local` takes a `Disambiguation` that picks one instant, with the meanings
+JavaScript's Temporal gives them:
+
+| | skipped time, as 02:30 when 02:00 becomes 03:00 | repeated time, as 01:30 when 02:00 becomes 01:00 |
+| --- | --- | --- |
+| `Compatible` | 03:30, moved later by the gap's length | the earlier instant |
+| `Earlier` | 01:30, moved earlier by the gap's length | the earlier instant |
+| `Later` | 03:30 | the later instant |
+| `Reject` | an `err` | an `err` |
+
+### ZonedDateTime
+
+| | |
+| --- | --- |
+| `ZonedDateTime.of(year, month, day, hour, minute, second, zone: TimeZone)` → result | `Compatible` |
+| `ZonedDateTime.new(dt: DateTime, zone)`, `dt.in_zone(zone)` | `Compatible` |
+| `ZonedDateTime.from_local(dt, zone, how: Disambiguation)` → result | an `err` only for `Reject` |
+| `ZonedDateTime.from_instant(i: Instant, zone)`, `i.in_zone(zone)`, `odt.in_zone(zone)` | |
+| `ZonedDateTime.now(zone)`, `ZonedDateTime.now_local()` | |
+| `.datetime`, `.offset`, `.zone`, `.date()`, `.time()` | the parts. `.offset` is always the zone's offset then |
+| `.to_instant()`, `.to_offset_datetime()`, `.in_zone(other: TimeZone)` | the same instant |
+| `.abbreviation()`, `.is_dst()` | `"CST"`, `false` |
+| `zdt + d`, `zdt - d` | `d` later in exact time |
+| `zdt + p`, `zdt - p`, `.add_days(n)` | on the wall clock. A skipped time moves later, and a repeated one keeps the offset if it can |
+| `.duration_until(other: ZonedDateTime)` | between the two instants |
+| `.format(pattern)` | `%Z` writes the abbreviation |
+| `ZonedDateTime.parse(text, pattern, zone)` → result | an offset in the text must be the zone's, and picks between repeated times |
+| `ZonedDateTime.parse_iso(text)` → result | RFC 9557: `2026-11-06T19:13:31-06:00[America/Chicago]`, with the offset optional |
+
+`==` compares parts, zone included. `<` orders by instant, then wall clock time, then the zone's
+name.
 
 ## Formatting and parsing
 
@@ -188,6 +280,8 @@ ask whether two values are the same instant. `<` orders by instant first.
   `hh:mm`, and fractions of 1 to 9 digits after `.` or `,`.
 - `T`, `t`, or a space separates a date and a time.
 - Offsets are `Z` or `+hh:mm`. `parse_iso` also reads `z`, `+hhmm`, and `+hh`.
+- A `ZonedDateTime` adds its zone's name in brackets, as RFC 9557 does:
+  `2026-11-06T19:13:31-06:00[America/Chicago]`.
 
 ### Patterns
 
@@ -212,7 +306,7 @@ ask whether two values are the same instant. `<` orders by instant first.
 | `%3f`, `%6f`, `%9f` | milliseconds, microseconds, nanoseconds | `500` |
 | `%p`, `%P` | `AM` or `PM`, and `am` or `pm`. Parsing ignores case | `PM` |
 | `%z`, `%:z` | offset | `-0600`, `-06:00` |
-| `%Z` | `UTC` for offset 0, or the offset. Parsing also reads `GMT` | `-06:00` |
+| `%Z` | a `ZonedDateTime`'s abbreviation, else `UTC` for offset 0 or the offset. Parsing reads `UTC`, `GMT`, or an offset | `CST`, `-06:00` |
 | `%s` | seconds since 1970-01-01T00:00:00Z | `1794014011` |
 | `%F` | `%Y-%m-%d` | `2026-11-06` |
 | `%T`, `%R` | `%H:%M:%S`, `%H:%M` | `19:13:31` |
@@ -239,9 +333,11 @@ When parsing:
 
 ## Limits
 
-- **Fixed offsets only.** There are no time zones such as `America/Chicago`, so nothing here
-  knows about daylight saving time, and there is no local time zone. Time zones are planned for
-  the next release.
+- **Time zones come from the system.** `TimeZone.get` reads the IANA database the operating
+  system ships, so its rules are as current as the system's. Windows has no such database, so
+  there only `UTC`, fixed offsets, `TimeZone.posix`, and `TimeZone.from_tzif` work, unless
+  `TZDIR` names a copy of the database, and `TimeZone.local()` is UTC unless `TZ` is set. Zones
+  with leap seconds (`right/...`) are not supported.
 - **No leap seconds.** `23:59:60` is not a valid time, and every day has 86400 seconds.
 - **Microsecond clock.** `Instant.now()` comes from stone's `time.now()`, a float. At today's
   dates that float holds the time to about a quarter of a microsecond, so `now` rounds to the
@@ -264,6 +360,7 @@ plain ints and strings:
 - `text.stn` pads numbers and holds names.
 - `fmt.stn` formats with strftime patterns.
 - `parse.stn` reads strptime patterns and ISO 8601.
+- `tz.stn` reads TZif files and POSIX TZ strings, and finds a zone's offsets.
 
 Their functions are `pub` only so `lib.stn` can call them. Programs should use the types instead.
 

@@ -10,20 +10,22 @@ use datetime.Offset
 use datetime.OffsetDateTime
 use datetime.Period
 use datetime.Weekday
+use datetime.TimeZone
+use datetime.ZonedDateTime
 
 // Dates: building, facts, and calendar arithmetic.
 d = Date.of(2026, 11, 6).unwrap()
 print(d, datetime.weekday_name(d.weekday()), "day", d.day_of_year(), "ISO week", d.iso_week())
-print("a month after Jan 31:", Date.of(2026, 1, 31).unwrap().add_months(1))
-print("plus P1Y2M3D:", d.add_period(Period.of(1, 2, 3)))
+print("a month after Jan 31:", Date.of(2026, 1, 31).unwrap() + Period.of_months(1))
+print("plus P1Y2M3D:", d + Period.of(1, 2, 3))
 print("days until new year:", d.days_until(Date.of(2027, 1, 1).unwrap()))
 print("next Friday is a Friday:", d.add_weeks(1).weekday() == Weekday.Friday)
 
 // Times and durations.
 t = Time.of(23, 30, 0).unwrap()
-print(t, "+ 45 minutes =", t.add(Duration.of_minutes(45)))
+print(t, "+ 45 minutes =", t + Duration.of_minutes(45))
 lap = Duration.of_millis(83250)
-print("lap", lap, "=", lap.as_seconds_float(), "seconds; a third of it is", lap.div(3))
+print("lap", lap, "=", lap.as_seconds_float(), "seconds; a third of it is", lap / 3)
 
 // Dates and times at an offset, and instants.
 cst = Offset.of_hours(-6).unwrap()
@@ -31,6 +33,14 @@ meeting = OffsetDateTime.of(2026, 11, 6, 19, 13, 31, cst).unwrap()
 print("meeting:", meeting, "=", meeting.to_utc(), "=", meeting.to_offset(Offset.of_hm(5, 30).unwrap()))
 print("as unix time:", meeting.to_instant().unix_seconds())
 print("one billion seconds after the epoch:", Instant.from_unix(1000000000))
+
+// Time zones, from the system's time zone database.
+chicago = TimeZone.get("America/Chicago").unwrap()
+eve = ZonedDateTime.of(2026, 10, 31, 18, 0, 0, chicago).unwrap()
+print("in Chicago:", eve, eve.abbreviation())
+print("a day later:", eve + Period.of_days(1), "but 24 hours later:", eve + Duration.of_hours(24))
+print("in Kolkata:", eve.in_zone(TimeZone.get("Asia/Kolkata").unwrap()))
+print(ZonedDateTime.parse_iso("2026-03-08T02:30:00[America/Chicago]"), "(02:30 was skipped)")
 
 // Formatting and parsing.
 print(meeting.format("%A, %-d %B %Y at %-I:%M %p (%:z)"))

@@ -3,7 +3,7 @@
 [package]
 name = "examples"
 version = "0.1.0"
-stone = "0.4"
+stone = "0.4.4"
 
 [dependencies]
 datetime = { path = ".." }

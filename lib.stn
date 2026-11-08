@@ -8,6 +8,8 @@
 //   Offset          a fixed offset from UTC, such as +05:30
 //   OffsetDateTime  a date and time at an offset, which is one instant
 //   Instant         a point in time, counted from 1970-01-01T00:00:00Z
+//   TimeZone        a zone of the IANA database, such as America/Chicago, or a fixed offset
+//   ZonedDateTime   a date and time in a time zone, which is one instant
 //   Duration        an exact length of time, in seconds and nanoseconds
 //   Period          a length in calendar units: years, months, and days
 //   Weekday         Monday to Sunday
@@ -15,16 +17,20 @@
 // Dates use the proleptic Gregorian calendar with year 0 (1 BC), for years -999999 to 999999.
 // Times have nanosecond precision and no leap seconds.
 //
+// Arithmetic uses the operators: `date + Period.of_months(1)`, `instant - Duration.of_hours(2)`,
+// `d * 3`, and `-d`.
+//
 // Functions that build a value from parts or text return a `result`, with an error message if
 // the parts are invalid. Arithmetic that would leave the supported years, and a format pattern
 // with an unknown specifier, stop the program, as an index out of range does.
 
+use os
 use time
-use math
 use internal.civil
 use internal.text
 use internal.fmt
 use internal.parse
+use internal.tz
 
 // ---------------------------------------------------------------------------------------------
 // Limits and helpers
@@ -85,32 +91,11 @@ fn chain(c: ordering, a: int, b: int) -> ordering:
         ret c
     ret a.cmp(b)
 
-fn fields(kind: str, d: option[Date], t: option[Time], off: option[Offset]) -> fmt.Fields:
-    f = fmt.empty(kind)
-    match d:
-        case some(date):
-            f.has_date = true
-            f.year = date.year
-            f.month = date.month
-            f.day = date.day
-        case none:
-            f.has_date = false
-    match t:
-        case some(tm):
-            f.has_time = true
-            f.hour = tm.hour
-            f.minute = tm.minute
-            f.second = tm.second
-            f.nanosecond = tm.nanosecond
-        case none:
-            f.has_time = false
-    match off:
-        case some(o):
-            f.has_offset = true
-            f.offset = o.seconds
-        case none:
-            f.has_offset = false
-    ret f
+fn date_parts(d: Date) -> option[tuple[int, int, int]]:
+    ret some((d.year, d.month, d.day))
+
+fn time_parts(t: Time) -> option[tuple[int, int, int, int]]:
+    ret some((t.hour, t.minute, t.second, t.nanosecond))
 
 fn format_or_stop(f: fmt.Fields, pattern: str) -> str:
     match fmt.strftime(f, pattern):
@@ -177,7 +162,21 @@ pub fn weekday_name(w: Weekday) -> str:
     ret text.weekday_name(weekday_number(w))
 
 fn weekday_of(n: int) -> Weekday:
-    ret [Weekday.Monday, Weekday.Tuesday, Weekday.Wednesday, Weekday.Thursday, Weekday.Friday, Weekday.Saturday, Weekday.Sunday][n - 1]
+    match n:
+        case 1:
+            ret Weekday.Monday
+        case 2:
+            ret Weekday.Tuesday
+        case 3:
+            ret Weekday.Wednesday
+        case 4:
+            ret Weekday.Thursday
+        case 5:
+            ret Weekday.Friday
+        case 6:
+            ret Weekday.Saturday
+        case _:
+            ret Weekday.Sunday
 
 // ---------------------------------------------------------------------------------------------
 // Duration
@@ -249,7 +248,7 @@ impl Duration:
     // infinity, or a length out of range.
     fn of_seconds_float(x: float) -> Duration:
         assert x == x and x > -4.0e18 and x < 4.0e18, "datetime: {x} seconds is out of range for a duration"
-        s = math.floor(x)
+        s = x.floor()
         ret duration(s, int((x - float(s)) * 1000000000.0).unwrap())
 
     fn is_zero(self) -> bool:
@@ -258,49 +257,10 @@ impl Duration:
     fn is_negative(self) -> bool:
         ret self.secs < 0
 
-    fn add(self, other: Duration) -> Duration:
-        ret duration(self.secs + other.secs, self.nanos + other.nanos)
-
-    fn sub(self, other: Duration) -> Duration:
-        ret self.add(other.neg())
-
-    fn neg(self) -> Duration:
-        if self.nanos == 0:
-            ret duration(-self.secs, 0)
-        ret duration(-self.secs - 1, ns() - self.nanos)
-
     fn abs(self) -> Duration:
         if self.is_negative():
-            ret self.neg()
+            ret -self
         ret self
-
-    // The duration `k` times as long.
-    fn mul(self, k: int) -> Duration:
-        kh = civil.floor_div(k, ns())
-        kl = civil.floor_mod(k, ns())
-        low = self.nanos * kl
-        s = add_exact(mul_exact(self.secs, k, "duration"), mul_exact(self.nanos, kh, "duration"), "duration")
-        ret duration(add_exact(s, low / ns(), "duration"), low % ns())
-
-    // The duration divided by `k`, truncated toward zero to the nanosecond, exactly.
-    fn div(self, k: int) -> Duration:
-        assert k != 0, "datetime: duration divided by zero"
-        if k == -9223372036854775807 - 1:
-            ret self.div(-2).div(4611686018427387904)
-        negative = self.is_negative() != (k < 0)
-        m = self.abs()
-        kk = civil.abs(k)
-        qs = m.secs / kk
-        r = m.secs % kk
-        qn = 0
-        if r <= 9223372035:
-            qn = (r * ns() + m.nanos) / kk
-        else:
-            qn = long_quotient(r, m.nanos, kk)
-        q = duration(qs, qn)
-        if negative:
-            ret q.neg()
-        ret q
 
     // Whole units in the duration, truncated toward zero, so -90 seconds is -1 minute.
     fn whole_days(self) -> int:
@@ -338,6 +298,51 @@ impl Duration:
         secs, nanos = context(parse.iso_duration(input), "cannot parse '{input}' as an ISO 8601 duration")?
         ret ok(Duration(secs=secs, nanos=nanos))
 
+// `a + b`, `a - b`, and `-a` are exact.
+impl add[Duration] for Duration:
+    fn add(self, other: Duration) -> Self:
+        ret duration(self.secs + other.secs, self.nanos + other.nanos)
+
+impl sub[Duration] for Duration:
+    fn sub(self, other: Duration) -> Self:
+        ret self + -other
+
+impl neg for Duration:
+    fn neg(self) -> Self:
+        if self.nanos == 0:
+            ret duration(-self.secs, 0)
+        ret duration(-self.secs - 1, ns() - self.nanos)
+
+// The duration `k` times as long, exactly.
+impl mul[int] for Duration:
+    fn mul(self, k: int) -> Self:
+        kh = civil.floor_div(k, ns())
+        kl = civil.floor_mod(k, ns())
+        low = self.nanos * kl
+        s = add_exact(mul_exact(self.secs, k, "duration"), mul_exact(self.nanos, kh, "duration"), "duration")
+        ret duration(add_exact(s, low / ns(), "duration"), low % ns())
+
+// The duration divided by `k`, truncated toward zero to the nanosecond, exactly.
+impl div[int] for Duration:
+    fn div(self, k: int) -> Self:
+        assert k != 0, "datetime: duration divided by zero"
+        if k == -9223372036854775807 - 1:
+            ret self / -2 / 4611686018427387904
+        negative = self.is_negative() != (k < 0)
+        m = self.abs()
+        kk = k.abs()
+        qs = m.secs / kk
+        r = m.secs % kk
+        qn = 0
+        if r <= 9223372035:
+            qn = (r * ns() + m.nanos) / kk
+        else:
+            qn = long_quotient(r, m.nanos, kk)
+        q = duration(qs, qn)
+        if negative:
+            ret -q
+        ret q
+
 impl ord for Duration:
     fn cmp(self, other: Duration) -> ordering:
         ret chain(self.secs.cmp(other.secs), self.nanos, other.nanos)
@@ -351,7 +356,7 @@ impl display for Duration:
         d = self
         if self.is_negative():
             out = "-PT"
-            d = self.neg()
+            d = -self
         s = d.secs
         if s >= 3600:
             out += "{s / 3600}H"
@@ -393,17 +398,28 @@ impl Period:
     fn is_zero(self) -> bool:
         ret self.years == 0 and self.months == 0 and self.days == 0
 
-    // Adds the parts, without carrying months into years.
-    fn add(self, other: Period) -> Period:
-        ret Period(years=add_exact(self.years, other.years, "period"), months=add_exact(self.months, other.months, "period"), days=add_exact(self.days, other.days, "period"))
-
-    fn neg(self) -> Period:
-        ret Period(years=-self.years, months=-self.months, days=-self.days)
-
     // Reads an ISO 8601 period such as "P1Y2M3D", "P2W", "-P1M", or "P1Y-2M". A week is 7 days.
     fn parse_iso(input: str) -> result[Period, str]:
         y, m, d = context(parse.iso_period(input), "cannot parse '{input}' as an ISO 8601 period")?
         ret ok(Period(years=y, months=m, days=d))
+
+// Adds the parts, without carrying months into years.
+impl add[Period] for Period:
+    fn add(self, other: Period) -> Self:
+        ret Period(years=add_exact(self.years, other.years, "period"), months=add_exact(self.months, other.months, "period"), days=add_exact(self.days, other.days, "period"))
+
+impl sub[Period] for Period:
+    fn sub(self, other: Period) -> Self:
+        ret self + -other
+
+impl neg for Period:
+    fn neg(self) -> Self:
+        ret Period(years=mul_exact(self.years, -1, "period"), months=mul_exact(self.months, -1, "period"), days=mul_exact(self.days, -1, "period"))
+
+// Each part `k` times as large.
+impl mul[int] for Period:
+    fn mul(self, k: int) -> Self:
+        ret Period(years=mul_exact(self.years, k, "period"), months=mul_exact(self.months, k, "period"), days=mul_exact(self.days, k, "period"))
 
 // ISO 8601: "P1Y2M3D", with zero parts left out, and "P0D" for no time at all.
 impl display for Period:
@@ -490,7 +506,7 @@ impl Date:
             ret err("month {month} is out of range (1 to 12)")
         n = civil.days_in_month(year, month)
         if day < 1 or day > n:
-            ret err("day {day} is out of range for {text.year_text(year)}-{text.pad(month, 2)} (1 to {n})")
+            ret err("day {day} is out of range for {text.year_text(year)}-{month:02} (1 to {n})")
         ret ok(Date(year=year, month=month, day=day))
 
     // The `day_of_year`th day of `year`, counting January 1 as 1.
@@ -520,6 +536,10 @@ impl Date:
     // Today's date in UTC.
     fn today_utc() -> Date:
         ret Instant.now().to_utc().datetime.date
+
+    // Today's date in `zone`.
+    fn today(zone: TimeZone) -> Date:
+        ret ZonedDateTime.now(zone).datetime.date
 
     // The days from 1970-01-01 to this date, negative before it.
     fn to_epoch_days(self) -> int:
@@ -574,11 +594,6 @@ impl Date:
     fn add_years(self, n: int) -> Date:
         ret self.add_months(mul_exact(n, 12, "date"))
 
-    // Adds the years and months of `p` first, then its days.
-    fn add_period(self, p: Period) -> Date:
-        months = add_exact(mul_exact(p.years, 12, "date"), p.months, "date")
-        ret self.add_months(months).add_days(p.days)
-
     // The days from this date to `other`, negative if `other` is earlier.
     fn days_until(self, other: Date) -> int:
         ret other.to_epoch_days() - self.to_epoch_days()
@@ -590,7 +605,7 @@ impl Date:
     // Writes the date as `pattern` says, as `format("%d %B %Y")` gives "06 November 2026".
     // See the README for the specifiers. A time or offset specifier stops the program.
     fn format(self, pattern: str) -> str:
-        ret format_or_stop(fields("Date", some(self), none, none), pattern)
+        ret format_or_stop(fmt.Fields(kind="Date", date=date_parts(self), time=none, offset=none, zone=none), pattern)
 
     // Reads a date written as `pattern` says, such as `Date.parse("06/11/2026", "%d/%m/%Y")`.
     fn parse(input: str, pattern: str) -> result[Date, str]:
@@ -615,6 +630,17 @@ fn date_iso(input: str) -> result[Date, str]:
     parse.iso_end(cs, j)?
     ret Date.of(y, m, d)
 
+// `d + p` adds the years and months of `p` first, then its days, so 2026-01-31 + P1M1D is
+// 2026-03-01. `d - p` adds `-p`.
+impl add[Period] for Date:
+    fn add(self, p: Period) -> Self:
+        months = add_exact(mul_exact(p.years, 12, "date"), p.months, "date")
+        ret self.add_months(months).add_days(p.days)
+
+impl sub[Period] for Date:
+    fn sub(self, p: Period) -> Self:
+        ret self + -p
+
 impl ord for Date:
     fn cmp(self, other: Date) -> ordering:
         ret chain(chain(self.year.cmp(other.year), self.month, other.month), self.day, other.day)
@@ -622,7 +648,7 @@ impl ord for Date:
 // ISO 8601: "2026-11-06".
 impl display for Date:
     fn display(self) -> str:
-        ret "{text.year_text(self.year)}-{text.pad(self.month, 2)}-{text.pad(self.day, 2)}"
+        ret "{text.year_text(self.year)}-{self.month:02}-{self.day:02}"
 
 // ---------------------------------------------------------------------------------------------
 // Time
@@ -677,14 +703,6 @@ impl Time:
     fn nanos_of_day(self) -> int:
         ret self.seconds_of_day() * ns() + self.nanosecond
 
-    // The time `d` later, going around midnight as a clock does.
-    fn add(self, d: Duration) -> Time:
-        n = civil.floor_mod(d.secs, 86400) * ns() + d.nanos + self.nanos_of_day()
-        ret time_from_nanos(civil.floor_mod(n, 86400 * ns()))
-
-    fn sub(self, d: Duration) -> Time:
-        ret self.add(d.neg())
-
     // The duration from this time to `other` on the same day, negative if `other` is earlier.
     fn duration_until(self, other: Time) -> Duration:
         ret Duration.of_nanos(other.nanos_of_day() - self.nanos_of_day())
@@ -692,7 +710,7 @@ impl Time:
     // Writes the time as `pattern` says, as `format("%I:%M %p")` gives "07:13 PM". A date or
     // offset specifier stops the program.
     fn format(self, pattern: str) -> str:
-        ret format_or_stop(fields("Time", none, some(self), none), pattern)
+        ret format_or_stop(fmt.Fields(kind="Time", date=none, time=time_parts(self), offset=none, zone=none), pattern)
 
     // Reads a time written as `pattern` says. Minutes and seconds left out are 0.
     fn parse(input: str, pattern: str) -> result[Time, str]:
@@ -717,6 +735,16 @@ fn time_iso(input: str) -> result[Time, str]:
     parse.iso_end(cs, j)?
     ret Time.of_nanos(h, m, s, n)
 
+// `t + d` is the time `d` later, going around midnight as a clock does.
+impl add[Duration] for Time:
+    fn add(self, d: Duration) -> Self:
+        n = civil.floor_mod(d.secs, 86400) * ns() + d.nanos + self.nanos_of_day()
+        ret time_from_nanos(civil.floor_mod(n, 86400 * ns()))
+
+impl sub[Duration] for Time:
+    fn sub(self, d: Duration) -> Self:
+        ret self + -d
+
 impl ord for Time:
     fn cmp(self, other: Time) -> ordering:
         ret self.nanos_of_day().cmp(other.nanos_of_day())
@@ -724,7 +752,7 @@ impl ord for Time:
 // ISO 8601: "19:13:31", with a fraction of 3, 6, or 9 digits if needed, as "19:13:31.500".
 impl display for Time:
     fn display(self) -> str:
-        ret "{text.pad(self.hour, 2)}:{text.pad(self.minute, 2)}:{text.pad(self.second, 2)}{text.fraction_text(self.nanosecond)}"
+        ret "{self.hour:02}:{self.minute:02}:{self.second:02}{text.fraction_text(self.nanosecond)}"
 
 // ---------------------------------------------------------------------------------------------
 // DateTime
@@ -758,18 +786,12 @@ impl DateTime:
     fn now_utc() -> DateTime:
         ret Instant.now().to_utc().datetime
 
-    fn add(self, d: Duration) -> DateTime:
-        ret datetime_from_local(add_exact(local_seconds(self), d.secs, "date and time"), self.time.nanosecond + d.nanos)
-
-    fn sub(self, d: Duration) -> DateTime:
-        ret self.add(d.neg())
+    // The date and time now on the clocks of `zone`.
+    fn now(zone: TimeZone) -> DateTime:
+        ret ZonedDateTime.now(zone).datetime
 
     fn add_days(self, n: int) -> DateTime:
         ret DateTime(date=self.date.add_days(n), time=self.time)
-
-    // Adds `p` to the date, keeping the time of day.
-    fn add_period(self, p: Period) -> DateTime:
-        ret DateTime(date=self.date.add_period(p), time=self.time)
 
     // The duration from this date and time to `other`, negative if `other` is earlier.
     fn duration_until(self, other: DateTime) -> Duration:
@@ -782,9 +804,15 @@ impl DateTime:
     fn assume_utc(self) -> Instant:
         ret instant(local_seconds(self), self.time.nanosecond)
 
+    // This date and time on the clocks of `zone`. A time the clocks skip moves later by the
+    // length of the gap, and a time they show twice is the earlier instant, as
+    // `ZonedDateTime.new` says.
+    fn in_zone(self, zone: TimeZone) -> ZonedDateTime:
+        ret ZonedDateTime.new(self, zone)
+
     // Writes the date and time as `pattern` says. An offset specifier stops the program.
     fn format(self, pattern: str) -> str:
-        ret format_or_stop(fields("DateTime", some(self.date), some(self.time), none), pattern)
+        ret format_or_stop(fmt.Fields(kind="DateTime", date=date_parts(self.date), time=time_parts(self.time), offset=none, zone=none), pattern)
 
     // Reads a date and time written as `pattern` says. The pattern must read both.
     fn parse(input: str, pattern: str) -> result[DateTime, str]:
@@ -812,6 +840,24 @@ fn datetime_iso(input: str) -> result[DateTime, str]:
     y, mo, d, h, mi, s, n, j = parse.iso_datetime(cs, 0)?
     parse.iso_end(cs, j)?
     ret ok(DateTime(date=Date.of(y, mo, d)?, time=Time.of_nanos(h, mi, s, n)?))
+
+// `dt + d` is exact: every day has 24 hours, since a DateTime has no zone.
+impl add[Duration] for DateTime:
+    fn add(self, d: Duration) -> Self:
+        ret datetime_from_local(add_exact(local_seconds(self), d.secs, "date and time"), self.time.nanosecond + d.nanos)
+
+impl sub[Duration] for DateTime:
+    fn sub(self, d: Duration) -> Self:
+        ret self + -d
+
+// `dt + p` adds `p` to the date, keeping the time of day.
+impl add[Period] for DateTime:
+    fn add(self, p: Period) -> Self:
+        ret DateTime(date=self.date + p, time=self.time)
+
+impl sub[Period] for DateTime:
+    fn sub(self, p: Period) -> Self:
+        ret self + -p
 
 impl ord for DateTime:
     fn cmp(self, other: DateTime) -> ordering:
@@ -866,15 +912,9 @@ impl OffsetDateTime:
     fn to_utc(self) -> OffsetDateTime:
         ret self.to_offset(Offset.utc())
 
-    fn add(self, d: Duration) -> OffsetDateTime:
-        ret OffsetDateTime(datetime=self.datetime.add(d), offset=self.offset)
-
-    fn sub(self, d: Duration) -> OffsetDateTime:
-        ret self.add(d.neg())
-
-    // Adds `p` to the date, keeping the time of day and offset.
-    fn add_period(self, p: Period) -> OffsetDateTime:
-        ret OffsetDateTime(datetime=self.datetime.add_period(p), offset=self.offset)
+    // The same instant in `zone`.
+    fn in_zone(self, zone: TimeZone) -> ZonedDateTime:
+        ret zoned(self.to_instant(), zone)
 
     // The duration from this instant to `other`'s, negative if `other` is earlier.
     fn duration_until(self, other: OffsetDateTime) -> Duration:
@@ -882,7 +922,7 @@ impl OffsetDateTime:
 
     // Writes the date, time, and offset as `pattern` says.
     fn format(self, pattern: str) -> str:
-        ret format_or_stop(fields("OffsetDateTime", some(self.datetime.date), some(self.datetime.time), some(self.offset)), pattern)
+        ret format_or_stop(fmt.Fields(kind="OffsetDateTime", date=date_parts(self.datetime.date), time=time_parts(self.datetime.time), offset=some(self.offset.seconds), zone=none), pattern)
 
     // Reads a date, time, and offset written as `pattern` says. The pattern must read all
     // three, or the seconds since 1970 with `%s`, which are in UTC unless it reads an offset.
@@ -908,6 +948,23 @@ fn offset_datetime_iso(input: str) -> result[OffsetDateTime, str]:
     parse.iso_end(cs, j)?
     dt = DateTime(date=Date.of(y, mo, d)?, time=Time.of_nanos(h, mi, s, n)?)
     ret ok(OffsetDateTime(datetime=dt, offset=Offset.of_seconds(off)?))
+
+// `odt + d` and `odt + p` keep the offset.
+impl add[Duration] for OffsetDateTime:
+    fn add(self, d: Duration) -> Self:
+        ret OffsetDateTime(datetime=self.datetime + d, offset=self.offset)
+
+impl sub[Duration] for OffsetDateTime:
+    fn sub(self, d: Duration) -> Self:
+        ret self + -d
+
+impl add[Period] for OffsetDateTime:
+    fn add(self, p: Period) -> Self:
+        ret OffsetDateTime(datetime=self.datetime + p, offset=self.offset)
+
+impl sub[Period] for OffsetDateTime:
+    fn sub(self, p: Period) -> Self:
+        ret self + -p
 
 // Earlier instants first, and for one instant, the lower offset first, as java.time does.
 impl ord for OffsetDateTime:
@@ -942,7 +999,7 @@ impl Instant:
     // time as a float.
     fn now() -> Instant:
         t = time.now()
-        s = math.floor(t)
+        s = t.floor()
         micros = int((t - float(s)) * 1000000.0 + 0.5).unwrap()
         ret instant(s, micros * 1000)
 
@@ -974,12 +1031,6 @@ impl Instant:
     fn unix_nanos(self) -> int:
         ret add_exact(mul_exact(self.secs, ns(), "unix nanoseconds"), self.nanos, "unix nanoseconds")
 
-    fn add(self, d: Duration) -> Instant:
-        ret instant(add_exact(self.secs, d.secs, "instant"), self.nanos + d.nanos)
-
-    fn sub(self, d: Duration) -> Instant:
-        ret self.add(d.neg())
-
     // The duration from `earlier` to this instant, negative if `earlier` is later.
     fn duration_since(self, earlier: Instant) -> Duration:
         ret duration(self.secs - earlier.secs, self.nanos - earlier.nanos)
@@ -993,6 +1044,9 @@ impl Instant:
 
     fn to_utc(self) -> OffsetDateTime:
         ret OffsetDateTime.from_instant(self, Offset.utc())
+
+    fn in_zone(self, zone: TimeZone) -> ZonedDateTime:
+        ret zoned(self, zone)
 
     // Writes the instant in UTC as `pattern` says.
     fn format(self, pattern: str) -> str:
@@ -1008,6 +1062,14 @@ impl Instant:
         odt = OffsetDateTime.parse_iso(input)?
         ret ok(odt.to_instant())
 
+impl add[Duration] for Instant:
+    fn add(self, d: Duration) -> Self:
+        ret instant(add_exact(self.secs, d.secs, "instant"), self.nanos + d.nanos)
+
+impl sub[Duration] for Instant:
+    fn sub(self, d: Duration) -> Self:
+        ret self + -d
+
 impl ord for Instant:
     fn cmp(self, other: Instant) -> ordering:
         ret chain(self.secs.cmp(other.secs), self.nanos, other.nanos)
@@ -1016,6 +1078,306 @@ impl ord for Instant:
 impl display for Instant:
     fn display(self) -> str:
         ret str(self.to_utc())
+
+// ---------------------------------------------------------------------------------------------
+// TimeZone
+
+// A time zone: a name and the rules that give its offset from UTC at every instant. A zone of
+// the IANA database, such as America/Chicago, is at -06:00 in winter and -05:00 in summer.
+// `TimeZone.get` reads one from the system's copy of the database, so load a zone once and
+// keep it rather than loading it for every value.
+pub struct TimeZone:
+    name: str
+    rules: tz.Rules
+
+impl TimeZone:
+    fn utc() -> TimeZone:
+        ret TimeZone(name="UTC", rules=tz.fixed(0, "UTC"))
+
+    // The zone always at `offset`, named as the offset is written, as "+05:30".
+    fn fixed(offset: Offset) -> TimeZone:
+        if offset.seconds == 0:
+            ret TimeZone.utc()
+        name = text.offset_text(offset.seconds, true)
+        ret TimeZone(name=name, rules=tz.fixed(offset.seconds, name))
+
+    // The zone named `name`: "UTC", a fixed offset such as "+05:30", "localtime" for the
+    // system's zone, or a zone of the IANA database such as "America/Chicago", read from `TZDIR`
+    // or the system's zoneinfo directory.
+    fn get(name: str) -> result[TimeZone, str]:
+        if name == "UTC" or name == "Z":
+            ret ok(TimeZone.utc())
+        // The system's zone, also named "localtime" when its real name is unknown.
+        if name == "localtime":
+            ret ok(TimeZone.local())
+        if name.startswith("+") or name.startswith("-"):
+            ret ok(TimeZone.fixed(Offset.parse_iso(name)?))
+        ret ok(TimeZone(name=name, rules=tz.load(name)?))
+
+    // The system's time zone: the one `TZ` names, or else the one `/etc/localtime` holds, or
+    // else UTC. On Windows it is UTC unless `TZ` is set.
+    fn local() -> TimeZone:
+        name, rules = tz.local()
+        ret TimeZone(name=name, rules=rules)
+
+    // The zone a POSIX TZ string describes, as "CST6CDT,M3.2.0,M11.1.0", named by the string.
+    fn posix(spec: str) -> result[TimeZone, str]:
+        p = context(tz.read_posix(spec), "cannot parse '{spec}' as a POSIX TZ string")?
+        ret ok(TimeZone(name=spec, rules=tz.from_posix(p)))
+
+    // The zone in the TZif file `data` (RFC 8536), such as one in /usr/share/zoneinfo, named
+    // `name`.
+    fn from_tzif(name: str, data: bytes) -> result[TimeZone, str]:
+        rules = context(tz.read_tzif(data), "cannot read time zone '{name}'")?
+        ret ok(TimeZone(name=name, rules=rules))
+
+    // The zone's offset from UTC at instant `i`.
+    fn offset_at(self, i: Instant) -> Offset:
+        ret Offset(seconds=tz.offset_at(self.rules, i.secs))
+
+    // The abbreviation of the zone's time at instant `i`, as "CST" or "CDT".
+    fn abbreviation_at(self, i: Instant) -> str:
+        _o, _dst, abbr = tz.info_at(self.rules, i.secs)
+        ret abbr
+
+    // Whether the zone is on daylight saving time at instant `i`.
+    fn is_dst_at(self, i: Instant) -> bool:
+        _o, dst, _abbr = tz.info_at(self.rules, i.secs)
+        ret dst
+
+    // What the wall clock time `dt` means in this zone: one instant, two when the clocks go
+    // back and show it twice, or none when they skip it.
+    fn resolve(self, dt: DateTime) -> LocalTime:
+        n, a, b = tz.local_offsets(self.rules, local_seconds(dt))
+        match n:
+            case 1:
+                ret LocalTime.Unique(at=OffsetDateTime(datetime=dt, offset=Offset(seconds=a)))
+            case 2:
+                ret LocalTime.Ambiguous(earlier=OffsetDateTime(datetime=dt, offset=Offset(seconds=a)), later=OffsetDateTime(datetime=dt, offset=Offset(seconds=b)))
+            case _:
+                ret LocalTime.Gap(before=Offset(seconds=a), after=Offset(seconds=b))
+
+// The zone's name, as "America/Chicago".
+impl display for TimeZone:
+    fn display(self) -> str:
+        ret self.name
+
+// What a wall clock time means in a time zone, from `TimeZone.resolve`.
+pub enum LocalTime:
+    // The usual case: one instant.
+    Unique(at: OffsetDateTime)
+    // The clocks show the time twice, as when they go back an hour in autumn: first at
+    // `earlier`'s offset, then at `later`'s.
+    Ambiguous(earlier: OffsetDateTime, later: OffsetDateTime)
+    // The clocks skip the time, as when they go forward an hour in spring, from offset `before`
+    // to offset `after`.
+    Gap(before: Offset, after: Offset)
+
+// How to turn a wall clock time that the clocks skip or show twice into one instant, as in
+// JavaScript's Temporal.
+pub enum Disambiguation:
+    // A skipped time moves later by the length of the gap, so 02:30 on the night the clocks
+    // skip from 02:00 to 03:00 is 03:30. A time shown twice is the earlier instant.
+    Compatible
+    // The earlier instant: for a skipped time, the gap's length earlier (01:30 above).
+    Earlier
+    // The later instant: for a skipped time, the gap's length later (03:30 above).
+    Later
+    // An error for a time that is skipped or shown twice.
+    Reject
+
+// ---------------------------------------------------------------------------------------------
+// ZonedDateTime
+
+// A date and time in a time zone, which names one instant, as
+// "2026-11-06T19:13:31-06:00[America/Chicago]". `offset` is always the zone's offset at the
+// instant, so build values with the functions here rather than by hand.
+pub struct ZonedDateTime:
+    datetime: DateTime
+    offset: Offset
+    zone: TimeZone
+
+// Instant `i` in `zone`.
+fn zoned(i: Instant, zone: TimeZone) -> ZonedDateTime:
+    o = zone.offset_at(i)
+    ret ZonedDateTime(datetime=OffsetDateTime.from_instant(i, o).datetime, offset=o, zone=zone)
+
+// Wall clock time `dt` in `zone`, choosing as `how` says when the clocks skip or repeat it. For
+// a repeated time, `prefer` is kept if it is one of its offsets.
+fn zoned_local(dt: DateTime, zone: TimeZone, how: Disambiguation, prefer: option[Offset]) -> result[ZonedDateTime, str]:
+    match zone.resolve(dt):
+        case LocalTime.Unique(at):
+            ret ok(ZonedDateTime(datetime=dt, offset=at.offset, zone=zone))
+        case LocalTime.Ambiguous(earlier, later):
+            if prefer == some(later.offset):
+                ret ok(ZonedDateTime(datetime=dt, offset=later.offset, zone=zone))
+            if prefer == some(earlier.offset):
+                ret ok(ZonedDateTime(datetime=dt, offset=earlier.offset, zone=zone))
+            match how:
+                case Disambiguation.Later:
+                    ret ok(ZonedDateTime(datetime=dt, offset=later.offset, zone=zone))
+                case Disambiguation.Reject:
+                    ret err("{dt} happens twice in {zone}, at {earlier.offset} and then at {later.offset}")
+                case _:
+                    ret ok(ZonedDateTime(datetime=dt, offset=earlier.offset, zone=zone))
+        case LocalTime.Gap(before, after):
+            match how:
+                case Disambiguation.Earlier:
+                    ret ok(zoned(dt.at_offset(after).to_instant(), zone))
+                case Disambiguation.Reject:
+                    ret err("{dt} does not exist in {zone}, whose clocks skip it going from {before} to {after}")
+                case _:
+                    ret ok(zoned(dt.at_offset(before).to_instant(), zone))
+
+// Wall clock time `dt` in `zone`, at offset `offset` if one is given, which must be the zone's
+// offset then.
+fn zoned_at(dt: DateTime, offset: option[Offset], zone: TimeZone) -> result[ZonedDateTime, str]:
+    match offset:
+        case some(o):
+            z = zoned(dt.at_offset(o).to_instant(), zone)
+            if z.offset != o:
+                ret err("{zone} is not at offset {o} at {dt}")
+            ret ok(z)
+        case none:
+            ret ok(ZonedDateTime.new(dt, zone))
+
+impl ZonedDateTime:
+    // The date and time in `zone`, as `ZonedDateTime.new` resolves it.
+    fn of(year: int, month: int, day: int, hour: int, minute: int, second: int, zone: TimeZone) -> result[ZonedDateTime, str]:
+        dt = DateTime.of(year, month, day, hour, minute, second)?
+        ret ok(ZonedDateTime.new(dt, zone))
+
+    // Wall clock time `dt` in `zone`. A time the clocks skip moves later by the length of the
+    // gap, and a time they show twice is the earlier instant (`Disambiguation.Compatible`).
+    fn new(datetime: DateTime, zone: TimeZone) -> ZonedDateTime:
+        ret zoned_local(datetime, zone, Disambiguation.Compatible, none).unwrap()
+
+    // Wall clock time `dt` in `zone`, choosing as `how` says when the clocks skip it or show it
+    // twice. Only `Disambiguation.Reject` returns an error.
+    fn from_local(datetime: DateTime, zone: TimeZone, how: Disambiguation) -> result[ZonedDateTime, str]:
+        ret zoned_local(datetime, zone, how, none)
+
+    fn from_instant(i: Instant, zone: TimeZone) -> ZonedDateTime:
+        ret zoned(i, zone)
+
+    // The date and time now in `zone`.
+    fn now(zone: TimeZone) -> ZonedDateTime:
+        ret zoned(Instant.now(), zone)
+
+    // The date and time now in the system's time zone.
+    fn now_local() -> ZonedDateTime:
+        ret zoned(Instant.now(), TimeZone.local())
+
+    fn date(self) -> Date:
+        ret self.datetime.date
+
+    fn time(self) -> Time:
+        ret self.datetime.time
+
+    fn to_instant(self) -> Instant:
+        ret instant(local_seconds(self.datetime) - self.offset.seconds, self.datetime.time.nanosecond)
+
+    fn to_offset_datetime(self) -> OffsetDateTime:
+        ret OffsetDateTime(datetime=self.datetime, offset=self.offset)
+
+    // The same instant in another zone.
+    fn in_zone(self, zone: TimeZone) -> ZonedDateTime:
+        ret zoned(self.to_instant(), zone)
+
+    // The zone's abbreviation at this instant, as "CST".
+    fn abbreviation(self) -> str:
+        ret self.zone.abbreviation_at(self.to_instant())
+
+    fn is_dst(self) -> bool:
+        ret self.zone.is_dst_at(self.to_instant())
+
+    // The same wall clock time `n` days later, which is not always `n` times 24 hours.
+    fn add_days(self, n: int) -> ZonedDateTime:
+        ret self + Period.of_days(n)
+
+    // The duration from this instant to `other`'s, negative if `other` is earlier.
+    fn duration_until(self, other: ZonedDateTime) -> Duration:
+        ret other.to_instant().duration_since(self.to_instant())
+
+    // Writes the date, time, and zone as `pattern` says. `%Z` writes the zone's abbreviation.
+    fn format(self, pattern: str) -> str:
+        ret format_or_stop(fmt.Fields(kind="ZonedDateTime", date=date_parts(self.datetime.date), time=time_parts(self.datetime.time), offset=some(self.offset.seconds), zone=some(self.abbreviation())), pattern)
+
+    // Reads a date and time in `zone` written as `pattern` says. An offset the text gives must
+    // be the zone's offset then, and picks between the two instants of a time shown twice.
+    fn parse(input: str, pattern: str, zone: TimeZone) -> result[ZonedDateTime, str]:
+        ret context(zoned_parse(input, pattern, zone), "cannot parse '{input}' with '{pattern}'")
+
+    // Reads an RFC 9557 date and time with its zone's name in brackets, as
+    // "2026-11-06T19:13:31-06:00[America/Chicago]". The offset may be left out, as in
+    // "2026-11-06T19:13:31[America/Chicago]", and if it is there it must be the zone's offset.
+    fn parse_iso(input: str) -> result[ZonedDateTime, str]:
+        ret context(zoned_iso(input), "cannot parse '{input}' as an ISO 8601 date and time in a time zone")
+
+fn zoned_parse(input: str, pattern: str, zone: TimeZone) -> result[ZonedDateTime, str]:
+    p = parse.strptime(input, pattern)?
+    dt = datetime_parse(input, pattern)?
+    if p.offset.is_some():
+        ret zoned_at(dt, some(Offset.of_seconds(p.offset.unwrap())?), zone)
+    if p.unix.is_some():
+        ret ok(zoned(dt.assume_utc(), zone))
+    ret zoned_at(dt, none, zone)
+
+fn zoned_iso(input: str) -> result[ZonedDateTime, str]:
+    cs = text.chars(input)
+    y, mo, d, h, mi, s, n, j = parse.iso_datetime(cs, 0)?
+    dt = DateTime(date=Date.of(y, mo, d)?, time=Time.of_nanos(h, mi, s, n)?)
+    offset = none
+    if j < cs.len() and cs[j] != "[":
+        o, k = parse.iso_offset(cs, j)?
+        offset = some(Offset.of_seconds(o)?)
+        j = k
+    if j >= cs.len() or cs[j] != "[":
+        ret err("expected '[' and a time zone name at position {j}")
+    k = j + 1
+    while k < cs.len() and cs[k] != "]":
+        k += 1
+    if k >= cs.len():
+        ret err("expected ']' after the time zone name at position {j}")
+    parse.iso_end(cs, k + 1)?
+    ret zoned_at(dt, offset, TimeZone.get("".join(cs[j + 1:k]))?)
+
+// `zdt + d` is `d` later in exact time, so a day of 24 hours over a change of the clocks ends at
+// another wall clock time.
+impl add[Duration] for ZonedDateTime:
+    fn add(self, d: Duration) -> Self:
+        ret zoned(self.to_instant() + d, self.zone)
+
+impl sub[Duration] for ZonedDateTime:
+    fn sub(self, d: Duration) -> Self:
+        ret self + -d
+
+// `zdt + p` adds `p` to the wall clock date, keeping the time of day, so a day later is the same
+// time of day. A time the clocks skip moves later by the length of the gap, and a time they show
+// twice keeps the offset if it can, as java.time does.
+impl add[Period] for ZonedDateTime:
+    fn add(self, p: Period) -> Self:
+        ret zoned_local(self.datetime + p, self.zone, Disambiguation.Compatible, some(self.offset)).unwrap()
+
+impl sub[Period] for ZonedDateTime:
+    fn sub(self, p: Period) -> Self:
+        ret self + -p
+
+// Earlier instants first, then by wall clock time, then by the zone's name.
+impl ord for ZonedDateTime:
+    fn cmp(self, other: ZonedDateTime) -> ordering:
+        c = self.to_instant().cmp(other.to_instant())
+        if c != equal:
+            ret c
+        c = self.datetime.cmp(other.datetime)
+        if c != equal:
+            ret c
+        ret self.zone.name.cmp(other.zone.name)
+
+// RFC 9557: "2026-11-06T19:13:31-06:00[America/Chicago]".
+impl display for ZonedDateTime:
+    fn display(self) -> str:
+        ret "{self.datetime}{self.offset}[{self.zone.name}]"
 
 // ---------------------------------------------------------------------------------------------
 // Tests
@@ -1117,7 +1479,8 @@ test "date arithmetic":
     assert d.add_months(13) == Date.of(2027, 2, 28).unwrap()
     assert Date.of(2024, 2, 29).unwrap().add_years(1) == Date.of(2025, 2, 28).unwrap()
     assert Date.of(2024, 2, 29).unwrap().add_years(4) == Date.of(2028, 2, 29).unwrap()
-    assert d.add_period(Period.of(1, 1, 1)) == Date.of(2027, 3, 1).unwrap()
+    assert d + Period.of(1, 1, 1) == Date.of(2027, 3, 1).unwrap()
+    assert d - Period.of_months(2) == Date.of(2025, 11, 30).unwrap()
     assert d.days_until(Date.of(2026, 3, 1).unwrap()) == 29
     assert Date.of(2026, 3, 1).unwrap().days_until(d) == -29
     assert Date.of(1, 1, 1).unwrap().add_days(-1) == Date.of(0, 12, 31).unwrap()
@@ -1167,10 +1530,10 @@ test "times":
 
 test "time arithmetic goes around midnight":
     t = Time.of(23, 30, 0).unwrap()
-    assert t.add(Duration.of_minutes(45)) == Time.of(0, 15, 0).unwrap()
-    assert t.add(Duration.of_days(3)) == t
-    assert Time.of(0, 15, 0).unwrap().sub(Duration.of_minutes(30)) == Time.of(23, 45, 0).unwrap()
-    assert t.add(Duration.of_millis(-1)) == Time.of_nanos(23, 29, 59, 999000000).unwrap()
+    assert t + Duration.of_minutes(45) == Time.of(0, 15, 0).unwrap()
+    assert t + Duration.of_days(3) == t
+    assert Time.of(0, 15, 0).unwrap() - Duration.of_minutes(30) == Time.of(23, 45, 0).unwrap()
+    assert t + Duration.of_millis(-1) == Time.of_nanos(23, 29, 59, 999000000).unwrap()
     assert Time.noon().duration_until(t) == Duration.of_minutes(690)
     assert t.duration_until(Time.noon()) == Duration.of_minutes(-690)
 
@@ -1193,9 +1556,9 @@ test "durations":
     assert Duration.of_millis(-1500).whole_millis() == -1500
     assert Duration.of_micros(-1).whole_millis() == 0
     assert Duration.of_nanos(-1).whole_nanos() == -1
-    assert Duration.of_hours(2).add(Duration.of_minutes(30)) == Duration.of_minutes(150)
-    assert Duration.of_seconds(1).sub(Duration.of_millis(1500)) == Duration.of_millis(-500)
-    assert Duration.of_millis(1500).neg().neg() == Duration.of_millis(1500)
+    assert Duration.of_hours(2) + Duration.of_minutes(30) == Duration.of_minutes(150)
+    assert Duration.of_seconds(1) - Duration.of_millis(1500) == Duration.of_millis(-500)
+    assert -(-Duration.of_millis(1500)) == Duration.of_millis(1500)
     assert Duration.of_millis(-1500).abs() == Duration.of_millis(1500)
     assert Duration.of_millis(-1500).is_negative()
     assert Duration.zero().is_zero()
@@ -1203,22 +1566,27 @@ test "durations":
     assert Duration.of_millis(1500).as_seconds_float() == 1.5
     assert Duration.of_seconds_float(-1.5) == Duration.of_millis(-1500)
     assert Duration.of_days(1).whole_hours() == 24
+    total = Duration.zero()
+    for m in [5, 10, 15]:
+        total += Duration.of_minutes(m)
+    assert total == Duration.of_minutes(30)
+    assert Duration.of_seconds(3).add(Duration.of_seconds(4)) == Duration.of_seconds(7)
 
 test "duration multiplication and division are exact":
     d = Duration.of_millis(1500)
-    assert d.mul(3) == Duration.of_millis(4500)
-    assert d.mul(-1) == Duration.of_millis(-1500)
-    assert Duration.of_nanos(5).mul(10000000000) == Duration.of_seconds(50)
-    assert d.mul(0).is_zero()
-    assert d.div(2) == Duration.of_millis(750)
-    assert d.div(-2) == Duration.of_millis(-750)
-    assert Duration.of_nanos(-7).div(2) == Duration.of_nanos(-3)
-    assert Duration.of_seconds(1).div(3) == Duration.of_nanos(333333333)
-    assert Duration.of_days(365000000).div(7) == Duration(secs=4505142857142, nanos=857142857)
+    assert d * 3 == Duration.of_millis(4500)
+    assert d * -1 == Duration.of_millis(-1500)
+    assert Duration.of_nanos(5) * 10000000000 == Duration.of_seconds(50)
+    assert (d * 0).is_zero()
+    assert d / 2 == Duration.of_millis(750)
+    assert d / -2 == Duration.of_millis(-750)
+    assert Duration.of_nanos(-7) / 2 == Duration.of_nanos(-3)
+    assert Duration.of_seconds(1) / 3 == Duration.of_nanos(333333333)
+    assert Duration.of_days(365000000) / 7 == Duration(secs=4505142857142, nanos=857142857)
     big = Duration(secs=4611686018427387903, nanos=999999999)
-    assert big.div(100000000000) == Duration(secs=46116860, nanos=184273879)
-    assert big.div(-9223372036854775807 - 1) == Duration.of_nanos(-499999999)
-    assert big.div(1) == big
+    assert big / 100000000000 == Duration(secs=46116860, nanos=184273879)
+    assert big / (-9223372036854775807 - 1) == Duration.of_nanos(-499999999)
+    assert big / 1 == big
 
 test "duration display and parsing":
     assert str(Duration.of_minutes(90)) == "PT1H30M"
@@ -1238,8 +1606,10 @@ test "periods":
     assert str(Period.zero()) == "P0D"
     assert str(Period.of_weeks(2)) == "P14D"
     assert str(Period.of(-1, 2, 0)) == "P-1Y2M"
-    assert p.add(Period.of_months(11)) == Period.of(1, 13, 3)
-    assert p.neg() == Period.of(-1, -2, -3)
+    assert p + Period.of_months(11) == Period.of(1, 13, 3)
+    assert -p == Period.of(-1, -2, -3)
+    assert p - Period.of_days(5) == Period.of(1, 2, -2)
+    assert p * 2 == Period.of(2, 4, 6)
     assert Period.parse_iso("P1Y2M3D") == ok(p)
     assert Period.parse_iso("P2W") == ok(Period.of_days(14))
     assert Period.parse_iso("PT1H").is_err()
@@ -1264,11 +1634,11 @@ test "date and time":
     assert dt.date == Date.of(2026, 11, 6).unwrap()
     assert dt.time == Time.of(19, 13, 31).unwrap()
     assert Date.of(2026, 11, 6).unwrap().at(Time.of(19, 13, 31).unwrap()) == dt
-    assert dt.add(Duration.of_hours(5)) == DateTime.of(2026, 11, 7, 0, 13, 31).unwrap()
-    assert dt.sub(Duration.of_days(400)) == DateTime.of(2025, 10, 2, 19, 13, 31).unwrap()
-    assert dt.add(Duration.of_millis(-1)).time.nanosecond == 999000000
+    assert dt + Duration.of_hours(5) == DateTime.of(2026, 11, 7, 0, 13, 31).unwrap()
+    assert dt - Duration.of_days(400) == DateTime.of(2025, 10, 2, 19, 13, 31).unwrap()
+    assert (dt + Duration.of_millis(-1)).time.nanosecond == 999000000
     assert dt.add_days(25) == DateTime.of(2026, 12, 1, 19, 13, 31).unwrap()
-    assert dt.add_period(Period.of_months(3)) == DateTime.of(2027, 2, 6, 19, 13, 31).unwrap()
+    assert dt + Period.of_months(3) == DateTime.of(2027, 2, 6, 19, 13, 31).unwrap()
     other = DateTime.of(2026, 11, 7, 0, 0, 0).unwrap()
     assert dt.duration_until(other) == Duration.of_seconds(17189)
     assert other.duration_until(dt) == Duration.of_seconds(-17189)
@@ -1285,7 +1655,7 @@ test "date and time formatting and parsing":
     assert DateTime.parse("2026-11-06", "%F") == err("cannot parse '2026-11-06' with '%F': the pattern reads no time of day")
     assert DateTime.parse_iso("2026-11-06T19:13:31") == ok(dt)
     assert DateTime.parse_iso("2026-11-06 19:13:31") == ok(dt)
-    assert DateTime.parse_iso("2026-11-06T19:13:31.000000001") == ok(dt.add(Duration.of_nanos(1)))
+    assert DateTime.parse_iso("2026-11-06T19:13:31.000000001") == ok(dt + Duration.of_nanos(1))
     assert DateTime.parse_iso("2026-11-06T19:13:31Z").is_err()
 
 test "instants":
@@ -1299,8 +1669,8 @@ test "instants":
     assert Instant.from_unix_micros(-1500000).unix_micros() == -1500000
     assert Instant.from_unix(0).to_utc() == OffsetDateTime.of(1970, 1, 1, 0, 0, 0, Offset.utc()).unwrap()
     assert Instant.from_unix(-1).to_utc().datetime == DateTime.of(1969, 12, 31, 23, 59, 59).unwrap()
-    assert i.add(Duration.of_hours(1)).duration_since(i) == Duration.of_hours(1)
-    assert i.sub(Duration.of_millis(1)) < i
+    assert (i + Duration.of_hours(1)).duration_since(i) == Duration.of_hours(1)
+    assert i - Duration.of_millis(1) < i
     assert i.format("%s") == "1791512687"
     assert Instant.parse_iso("2026-10-09T02:24:47Z") == ok(i)
     assert Instant.parse_iso("2026-10-08T20:24:47-06:00") == ok(i)
@@ -1331,8 +1701,8 @@ test "dates and times at an offset":
     assert odt.to_offset(ist).cmp(odt) == greater
     assert odt.to_utc().cmp(odt) == greater
     assert odt.duration_until(odt.to_offset(ist)) == Duration.zero()
-    assert odt.add(Duration.of_hours(6)).datetime == DateTime.of(2026, 11, 7, 1, 13, 31).unwrap()
-    assert odt.add_period(Period.of_days(1)).offset == cst
+    assert (odt + Duration.of_hours(6)).datetime == DateTime.of(2026, 11, 7, 1, 13, 31).unwrap()
+    assert (odt + Period.of_days(1)).offset == cst
     assert odt.format("%Y-%m-%dT%H:%M:%S%:z") == "2026-11-06T19:13:31-06:00"
     assert odt.format("%a, %d %b %Y %T %z") == "Fri, 06 Nov 2026 19:13:31 -0600"
 
@@ -1355,6 +1725,121 @@ test "the far ends of the supported years":
     assert str(hi) == "+999999-12-31"
     assert str(lo) == "-999999-01-01"
     end = hi.at(Time.of_nanos(23, 59, 59, 999999999).unwrap())
-    assert Instant.from_unix(31494784780799).to_utc().datetime == end.sub(Duration.of_nanos(999999999))
+    assert Instant.from_unix(31494784780799).to_utc().datetime == end - Duration.of_nanos(999999999)
     assert lo.at(Time.midnight()).assume_utc() == Instant.from_unix(-31619087596800)
     assert lo.days_until(hi) == 730484633
+
+fn central() -> TimeZone:
+    ret TimeZone.posix("CST6CDT,M3.2.0,M11.1.0").unwrap()
+
+test "time zones":
+    z = central()
+    assert str(z) == "CST6CDT,M3.2.0,M11.1.0"
+    winter = Instant.parse_iso("2026-01-15T12:00:00Z").unwrap()
+    summer = Instant.parse_iso("2026-07-15T12:00:00Z").unwrap()
+    assert z.offset_at(winter) == Offset.of_hours(-6).unwrap()
+    assert z.offset_at(summer) == Offset.of_hours(-5).unwrap()
+    assert z.abbreviation_at(winter) == "CST" and z.abbreviation_at(summer) == "CDT"
+    assert not z.is_dst_at(winter) and z.is_dst_at(summer)
+    assert TimeZone.get("UTC") == ok(TimeZone.utc())
+    assert TimeZone.get("+05:30").unwrap().offset_at(winter) == Offset.of_hm(5, 30).unwrap()
+    assert str(TimeZone.fixed(Offset.of_hours(-3).unwrap())) == "-03:00"
+    assert TimeZone.posix("CST") == err("cannot parse 'CST' as a POSIX TZ string: expected a number at position 3")
+    assert TimeZone.from_tzif("x", "nope".bytes()) == err("cannot read time zone 'x': the file ends inside its header")
+
+test "resolving wall clock times":
+    z = central()
+    cst = Offset.of_hours(-6).unwrap()
+    cdt = Offset.of_hours(-5).unwrap()
+    noon = DateTime.of(2026, 7, 1, 12, 0, 0).unwrap()
+    assert z.resolve(noon) == LocalTime.Unique(at=noon.at_offset(cdt))
+    gap = DateTime.of(2026, 3, 8, 2, 30, 0).unwrap()
+    assert z.resolve(gap) == LocalTime.Gap(before=cst, after=cdt)
+    twice = DateTime.of(2026, 11, 1, 1, 30, 0).unwrap()
+    assert z.resolve(twice) == LocalTime.Ambiguous(earlier=twice.at_offset(cdt), later=twice.at_offset(cst))
+
+test "disambiguation":
+    z = central()
+    gap = DateTime.of(2026, 3, 8, 2, 30, 0).unwrap()
+    assert str(ZonedDateTime.new(gap, z).datetime) == "2026-03-08T03:30:00"
+    assert str(ZonedDateTime.from_local(gap, z, Disambiguation.Later).unwrap().datetime) == "2026-03-08T03:30:00"
+    assert str(ZonedDateTime.from_local(gap, z, Disambiguation.Earlier).unwrap().datetime) == "2026-03-08T01:30:00"
+    assert ZonedDateTime.from_local(gap, z, Disambiguation.Reject) == err("2026-03-08T02:30:00 does not exist in CST6CDT,M3.2.0,M11.1.0, whose clocks skip it going from -06:00 to -05:00")
+    twice = DateTime.of(2026, 11, 1, 1, 30, 0).unwrap()
+    assert ZonedDateTime.new(twice, z).offset == Offset.of_hours(-5).unwrap()
+    assert ZonedDateTime.from_local(twice, z, Disambiguation.Later).unwrap().offset == Offset.of_hours(-6).unwrap()
+    assert ZonedDateTime.from_local(twice, z, Disambiguation.Reject).is_err()
+    assert twice.in_zone(z) == ZonedDateTime.new(twice, z)
+
+test "zoned dates and times":
+    z = central()
+    zdt = ZonedDateTime.of(2026, 11, 6, 19, 13, 31, z).unwrap()
+    assert str(zdt) == "2026-11-06T19:13:31-06:00[CST6CDT,M3.2.0,M11.1.0]"
+    assert zdt.offset == Offset.of_hours(-6).unwrap()
+    assert zdt.to_instant() == Instant.parse_iso("2026-11-07T01:13:31Z").unwrap()
+    assert zdt.to_offset_datetime() == OffsetDateTime.of(2026, 11, 6, 19, 13, 31, Offset.of_hours(-6).unwrap()).unwrap()
+    assert zdt.date() == Date.of(2026, 11, 6).unwrap() and zdt.time() == Time.of(19, 13, 31).unwrap()
+    assert zdt.abbreviation() == "CST" and not zdt.is_dst()
+    assert zdt.to_instant().in_zone(z) == zdt
+    assert zdt.to_offset_datetime().in_zone(z) == zdt
+    utc = zdt.in_zone(TimeZone.utc())
+    assert str(utc) == "2026-11-07T01:13:31Z[UTC]"
+    assert utc.to_instant() == zdt.to_instant()
+    assert zdt.format("%a %b %e %H:%M %Z (%:z)") == "Fri Nov  6 19:13 CST (-06:00)"
+    assert ZonedDateTime.of(2026, 2, 30, 0, 0, 0, z).is_err()
+
+test "arithmetic across a change of the clocks":
+    z = central()
+    // Saturday before the clocks go back at 02:00 on 2026-11-01.
+    start = ZonedDateTime.of(2026, 10, 31, 12, 0, 0, z).unwrap()
+    assert str(start + Duration.of_hours(24)) == "2026-11-01T11:00:00-06:00[CST6CDT,M3.2.0,M11.1.0]"
+    assert str(start + Period.of_days(1)) == "2026-11-01T12:00:00-06:00[CST6CDT,M3.2.0,M11.1.0]"
+    assert start.add_days(1) == start + Period.of_days(1)
+    assert start.duration_until(start + Period.of_days(1)) == Duration.of_hours(25)
+    assert (start + Period.of_days(1)) - Period.of_days(1) == start
+    assert (start + Duration.of_hours(24)) - Duration.of_hours(24) == start
+    // A wall clock time the clocks skip moves later; one they repeat keeps its offset.
+    before_gap = ZonedDateTime.of(2026, 3, 7, 2, 30, 0, z).unwrap()
+    assert str((before_gap + Period.of_days(1)).datetime) == "2026-03-08T03:30:00"
+    later = ZonedDateTime.from_local(DateTime.of(2026, 11, 1, 1, 30, 0).unwrap(), z, Disambiguation.Later).unwrap()
+    assert (later + Period.of_days(0)).offset == Offset.of_hours(-6).unwrap()
+    earlier = ZonedDateTime.new(DateTime.of(2026, 11, 1, 1, 30, 0).unwrap(), z)
+    assert earlier + Duration.of_hours(1) == later
+    assert earlier < later and earlier.datetime == later.datetime
+
+test "parsing zoned dates and times":
+    z = central()
+    zdt = ZonedDateTime.of(2026, 11, 1, 1, 30, 0, z).unwrap()
+    assert ZonedDateTime.parse("2026-11-01 01:30", "%F %H:%M", z) == ok(zdt)
+    assert ZonedDateTime.parse("2026-11-01 01:30 -0600", "%F %H:%M %z", z).unwrap().offset == Offset.of_hours(-6).unwrap()
+    assert ZonedDateTime.parse("2026-11-01 01:30 +0100", "%F %H:%M %z", z) == err("cannot parse '2026-11-01 01:30 +0100' with '%F %H:%M %z': CST6CDT,M3.2.0,M11.1.0 is not at offset +01:00 at 2026-11-01T01:30:00")
+    assert ZonedDateTime.parse("1793516400", "%s", z).unwrap().to_instant() == Instant.from_unix(1793516400)
+    assert ZonedDateTime.parse_iso("2026-11-07T01:13:31Z[UTC]") == ok(Instant.parse_iso("2026-11-07T01:13:31Z").unwrap().in_zone(TimeZone.utc()))
+    assert ZonedDateTime.parse_iso("2026-11-06T19:13:31+05:30[+05:30]").unwrap().offset == Offset.of_hm(5, 30).unwrap()
+    assert ZonedDateTime.parse_iso("2026-11-06T19:13:31[UTC]").unwrap().offset == Offset.utc()
+    assert ZonedDateTime.parse_iso("2026-11-06T19:13:31-06:00").is_err()
+    assert ZonedDateTime.parse_iso("2026-11-06T19:13:31[UTC") == err("cannot parse '2026-11-06T19:13:31[UTC' as an ISO 8601 date and time in a time zone: expected ']' after the time zone name at position 19")
+
+test "zones from the system's database":
+    if os.platform() == "windows":
+        ret
+    chicago = TimeZone.get("America/Chicago").unwrap()
+    zdt = ZonedDateTime.of(2026, 11, 6, 19, 13, 31, chicago).unwrap()
+    assert str(zdt) == "2026-11-06T19:13:31-06:00[America/Chicago]"
+    assert ZonedDateTime.parse_iso(str(zdt)) == ok(zdt)
+    // Before standard time, Chicago kept local mean time, 5:50:36 behind UTC.
+    assert chicago.offset_at(Instant.from_unix(-3000000000)) == Offset.of_seconds(-21036).unwrap()
+    // India has no daylight saving time, and Lord Howe Island moves its clocks half an hour.
+    kolkata = TimeZone.get("Asia/Kolkata").unwrap()
+    assert str(zdt.in_zone(kolkata)) == "2026-11-07T06:43:31+05:30[Asia/Kolkata]"
+    lord_howe = TimeZone.get("Australia/Lord_Howe").unwrap()
+    assert lord_howe.offset_at(Instant.parse_iso("2027-01-01T00:00:00Z").unwrap()) == Offset.of_seconds(39600).unwrap()
+    assert lord_howe.offset_at(Instant.parse_iso("2027-07-01T00:00:00Z").unwrap()) == Offset.of_seconds(37800).unwrap()
+    // Samoa skipped 2011-12-30 entirely when it moved across the date line.
+    apia = TimeZone.get("Pacific/Apia").unwrap()
+    assert apia.resolve(DateTime.of(2011, 12, 30, 12, 0, 0).unwrap()) == LocalTime.Gap(before=Offset.of_hours(-10).unwrap(), after=Offset.of_hours(14).unwrap())
+    assert TimeZone.get("Nowhere/City") == err("unknown time zone 'Nowhere/City'")
+    assert TimeZone.get("America") == err("unknown time zone 'America'")
+    assert TimeZone.get("../etc/passwd") == err("'../etc/passwd' is not a time zone name")
+    assert TimeZone.local().name != ""
+    assert TimeZone.get("localtime") == ok(TimeZone.local())
