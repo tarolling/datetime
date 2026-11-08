@@ -102,3 +102,24 @@ jobs:
             printf 'k=%-6s exit=%-4s %s\n' "$k" "$status" "$(echo "$out" | head -1)"
             python3 -I macho.py build/lit$k
           done
+
+      - name: Threshold sweep and backtrace
+        continue-on-error: true
+        working-directory: repro
+        run: |
+          sizes="400 410 420 430 440 450 460 470 480 490 500"
+          python3 -I gen.py $sizes
+          first=""
+          for n in $sizes; do
+            stone build globs$n.stn > /dev/null
+            if out=$(./build/globs$n 2>&1); then status=0; else status=$?; fi
+            printf 'N=%-5s exit=%-4s %s\n' "$n" "$status" "$(echo "$out" | head -1)"
+            python3 -I macho.py build/globs$n
+            if [ "$status" != 0 ] && [ -z "$first" ]; then first=$n; fi
+          done
+          echo "first crash: N=$first"
+          if [ -n "$first" ]; then
+            nm build/globs$first | grep -E " [bBdD] " | sort | tail -12
+            lldb --batch -o run -k "bt 20" -k "register read x0 x1 x2 x8 x9 x10 x11 x16 x17 lr pc" \
+              -k "disassemble --pc --count 8" -k "memory region \$pc" ./build/globs$first || true
+          fi
