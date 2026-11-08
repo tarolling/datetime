@@ -6,7 +6,8 @@ on:
   pull_request:
 
 # Diagnostic run: compiled lib.stn tests crash with a signal on macOS (aarch64) under stone
-# 0.4.4. This compares 0.4.3 and 0.4.4 there and gets a backtrace from a small program.
+# 0.4.4, while compiled programs that use the package run. This compares 0.4.3 and 0.4.4 there
+# and gets a backtrace from one compiled lib.stn test.
 jobs:
   test:
     name: test (${{ matrix.os }}, stone ${{ matrix.stone }})
@@ -28,6 +29,10 @@ jobs:
 
       - run: stone --version
 
+      - name: Let stone 0.4.3 build the package
+        if: matrix.stone == 'v0.4.3'
+        run: sed -i '' 's/^stone = "0.4.4"/stone = "0.4.3"/' stone.toml examples/stone.toml
+
       - name: Test (interpreter)
         continue-on-error: true
         run: stone test
@@ -36,29 +41,12 @@ jobs:
         continue-on-error: true
         run: stone test --build
 
-      - name: Build and run small programs
+      - name: Backtrace of one compiled lib.stn test
         continue-on-error: true
-        working-directory: examples
         run: |
-          cat > date.stn <<'EOF'
-          use datetime.Date
-          print(Date.of(2026, 11, 6).unwrap())
-          EOF
-          cat > zone.stn <<'EOF'
-          use datetime.TimeZone
-          print(TimeZone.get("America/Chicago").unwrap().name)
-          EOF
-          for p in date zone tour; do
-            echo "== $p"
-            stone build $p.stn
-            ./build/$p; echo "exit status $?"
-          done
-
-      - name: Backtraces
-        continue-on-error: true
-        working-directory: examples
-        run: |
-          for p in date tour; do
-            echo "== $p"
-            lldb --batch -o run -o bt -o "register read pc lr sp" -o "disassemble --pc --count 12" ./build/$p || true
-          done
+          stone test --build --filter "building dates" lib.stn || true
+          line=$(grep -n '^test "building dates":' lib.stn | cut -d: -f1)
+          echo "STONE_TEST=test.$line.1"
+          STONE_TEST="test.$line.1" ./build/test/lib; echo "exit status $?"
+          lldb --batch -o "process launch -v STONE_TEST=test.$line.1" -o "bt 30" \
+            -o "register read" -o "disassemble --pc --count 24" -o "image list" ./build/test/lib || true
