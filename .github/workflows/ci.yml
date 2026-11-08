@@ -63,3 +63,17 @@ jobs:
           echo "stone.free_blocks at 0x$addr"
           otool -l build/test/lib | grep -A3 LC_SYMTAB -m1 || true
           otool -l build/test/lib | grep -E -A4 "cmd LC_SYMTAB" | grep -E "stroff|strsize|symoff" || true
+
+      - name: Compare the zero-fill page with the file
+        continue-on-error: true
+        run: |
+          line=$(grep -n '^test "building dates":' lib.stn | cut -d: -f1)
+          echo "== file bytes at offsets 0xcf538 (free_blocks) and 0xcf568 (free_blocks+48)"
+          xxd -s 0xcf538 -l 64 build/test/lib
+          echo "== file bytes at 0xcc000 (start of __DATA's zero-fill page)"
+          xxd -s 0xcc000 -l 32 build/test/lib
+          echo "== load commands"
+          otool -l build/test/lib | grep -E "^ +cmd " | sort | uniq -c
+          echo "== memory of the crashed process"
+          STONE_TEST="test.$line.1" lldb --batch -o run -k "memory read --size 1 --count 64 0x1000cf538" \
+            -k "memory read --size 1 --count 32 0x1000cc000" -k "image dump sections lib" ./build/test/lib || true
