@@ -50,3 +50,16 @@ jobs:
           STONE_TEST="test.$line.1" ./build/test/lib || echo "exit status $?"
           STONE_TEST="test.$line.1" lldb --batch -o run -k "bt 30" -k "register read" \
             -k "disassemble --pc --count 24" -k "disassemble --start-address \$lr --count 8" ./build/test/lib || true
+
+      - name: Segment layout of the lib.stn test binary
+        continue-on-error: true
+        run: |
+          pagesize
+          ls -l build/test/lib
+          otool -l build/test/lib | grep -E -A10 "cmd LC_SEGMENT_64" | grep -E "segname|vmaddr|vmsize|fileoff|filesize|nsects"
+          otool -l build/test/lib | grep -E -A6 "sectname" | grep -E "sectname|segname|addr|size|offset"
+          nm build/test/lib | grep -E "free_blocks|stone\.heap|_end$" || true
+          addr=$(nm build/test/lib | awk '/stone.free_blocks/{print $1; exit}')
+          echo "stone.free_blocks at 0x$addr"
+          otool -l build/test/lib | grep -A3 LC_SYMTAB -m1 || true
+          otool -l build/test/lib | grep -E -A4 "cmd LC_SYMTAB" | grep -E "stroff|strsize|symoff" || true
