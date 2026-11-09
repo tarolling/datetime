@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The oldest supported stone is now 0.4.5, for its fix to compiled macOS programs that could start
+  with garbage in their globals and crash.
+
 ## 0.2.0 (2026-11-08)
 
 Time zones, and arithmetic with operators. This release needs stone 0.4.4.
