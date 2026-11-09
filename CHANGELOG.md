@@ -1,15 +1,8 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- The oldest supported stone is now 0.4.5, for its fix to compiled macOS programs that could start
-  with garbage in their globals and crash.
-
 ## 0.2.0 (2026-11-08)
 
-Time zones, and arithmetic with operators. This release needs stone 0.4.4.
+Time zones, and arithmetic with operators. This release needs stone 0.4.5.
 
 ### Added
 
@@ -31,8 +24,9 @@ Time zones, and arithmetic with operators. This release needs stone 0.4.4.
 
 ### Changed
 
-- The oldest supported stone is now 0.4.4, for its operator traits and its fixes to compiled
-  programs that read files as bytes.
+- The oldest supported stone is now 0.4.5, for its operator traits, its fixes to compiled
+  programs that read files as bytes, and its fix to compiled macOS programs that could start with
+  garbage in their globals and crash.
 - `add`, `sub`, `neg`, `mul`, and `div` are now the operator traits' methods. `d.add(e)` still
   works and means `d + e`.
 
