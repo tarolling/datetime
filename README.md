@@ -27,7 +27,7 @@ print(meeting.in_zone(TimeZone.get("Asia/Kolkata").unwrap()))      // 2026-11-07
 stone add github:tarolling/datetime
 ```
 
-This needs stone 0.4.5 or later. Then `use datetime` and write `datetime.Date`, or import each
+This needs stone 0.4.6 or later. Then `use datetime` and write `datetime.Date`, or import each
 type by name with `use datetime.Date`.
 
 ## Types

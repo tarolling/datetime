@@ -27,7 +27,7 @@ pub fn year_text(year: int) -> str:
 pub fn fraction_text(nanos: int) -> str:
     if nanos == 0:
         ret ""
-    if nanos % 1000000 == 0:
+    if nanos % 1_000_000 == 0:
         ret ".{nanos / 1000000:03}"
     if nanos % 1000 == 0:
         ret ".{nanos / 1000:06}"
@@ -91,7 +91,7 @@ test "zero padding":
     assert pad(123, 2) == "123"
     assert pad(0, 4) == "0000"
     assert pad(-7, 3) == "-007"
-    assert pad(-9223372036854775807 - 1, 2) == "-9223372036854775808"
+    assert pad(-9_223_372_036_854_775_807 - 1, 2) == "-9223372036854775808"
 
 test "years":
     assert year_text(2026) == "2026"

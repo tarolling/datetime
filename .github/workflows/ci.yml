@@ -5,9 +5,9 @@ on:
     branches: [main]
   pull_request:
 
-# The oldest stone this package supports, which `stone = "0.4.5"` in stone.toml promises.
+# The oldest stone this package supports, which `stone = "0.4.6"` in stone.toml promises.
 env:
-  STONE_VERSION: v0.4.5
+  STONE_VERSION: v0.4.6
 
 jobs:
   test:
@@ -40,6 +40,12 @@ jobs:
       - name: Check formatting
         if: runner.os == 'Linux'
         run: stone fmt --check
+
+      - name: Check for warnings
+        if: runner.os == 'Linux'
+        run: |
+          stone check --deny warnings
+          cd examples && stone check --deny warnings tour.stn
 
       - name: Test (interpreter)
         run: stone test

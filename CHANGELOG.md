@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 (unreleased)
+
+This release needs stone 0.4.6. The API is unchanged.
+
+### Changed
+
+- The oldest supported stone is now 0.4.6, for its constants, bitwise operators, and lints. The
+  package's fixed limits are constants now, so each use compiles to its value instead of a call.
+- CI fails on any warning, with `stone check --deny warnings`.
+
 ## 0.2.0 (2026-11-08)
 
 Time zones, and arithmetic with operators. This release needs stone 0.4.5.

@@ -35,32 +35,24 @@ use internal.tz
 // ---------------------------------------------------------------------------------------------
 // Limits and helpers
 
-fn ns() -> int:
-    ret 1000000000
+const ns = 1_000_000_000
 
-fn min_year() -> int:
-    ret -999999
+const min_year = -999_999
 
-fn max_year() -> int:
-    ret 999999
+const max_year = 999_999
 
 // The days from 1970-01-01 to -999999-01-01 and to 999999-12-31.
-fn min_epoch_days() -> int:
-    ret -365961662
+const min_epoch_days = -365_961_662
 
-fn max_epoch_days() -> int:
-    ret 364522971
+const max_epoch_days = 364_522_971
 
 // The seconds from 1970-01-01T00:00:00 to -999999-01-01T00:00:00 and to 999999-12-31T23:59:59.
-fn min_unix_seconds() -> int:
-    ret -31619087596800
+const min_unix_seconds = -31_619_087_596_800
 
-fn max_unix_seconds() -> int:
-    ret 31494784780799
+const max_unix_seconds = 31_494_784_780_799
 
 // 2^62 - 1: about 146 billion years, so two durations always add without overflowing an int.
-fn max_duration_seconds() -> int:
-    ret 4611686018427387903
+const max_duration_seconds = (1 << 62) - 1
 
 fn add_exact(a: int, b: int, what: str) -> int:
     match civil.checked_add(a, b):
@@ -190,21 +182,21 @@ pub struct Duration:
 
 // The duration of `secs` seconds plus `nanos` nanoseconds, for any `nanos`.
 fn duration(secs: int, nanos: int) -> Duration:
-    s = add_exact(secs, civil.floor_div(nanos, ns()), "duration")
-    assert s >= -max_duration_seconds() - 1 and s <= max_duration_seconds(), "datetime: duration of {s} seconds is out of range"
-    ret Duration(secs=s, nanos=civil.floor_mod(nanos, ns()))
+    s = add_exact(secs, civil.floor_div(nanos, ns), "duration")
+    assert s >= -max_duration_seconds - 1 and s <= max_duration_seconds, "datetime: duration of {s} seconds is out of range"
+    ret Duration(secs=s, nanos=civil.floor_mod(nanos, ns))
 
 // The largest `q` below 1e9 with `q * k <= r * 1e9 + n`, for `0 <= r < k`, without overflowing.
 fn long_quotient(r: int, n: int, k: int) -> int:
-    kh = k / ns()
-    kl = k % ns()
+    kh = k / ns
+    kl = k % ns
     lo = 0
-    hi = ns() - 1
+    hi = ns - 1
     while lo < hi:
         mid = (lo + hi + 1) / 2
         low_part = mid * kl
-        high_part = mid * kh + low_part / ns()
-        low_part = low_part % ns()
+        high_part = mid * kh + low_part / ns
+        low_part = low_part % ns
         if high_part < r or (high_part == r and low_part <= n):
             lo = mid
         else:
@@ -213,7 +205,7 @@ fn long_quotient(r: int, n: int, k: int) -> int:
 
 // Truncates toward zero to whole `unit`s of nanoseconds, for a unit below a second.
 fn whole_units(d: Duration, unit: int) -> int:
-    v = add_exact(mul_exact(d.secs, ns() / unit, "duration"), d.nanos / unit, "duration")
+    v = add_exact(mul_exact(d.secs, ns / unit, "duration"), d.nanos / unit, "duration")
     if d.secs < 0 and d.nanos % unit != 0:
         v += 1
     ret v
@@ -236,20 +228,20 @@ impl Duration:
         ret duration(n, 0)
 
     fn of_millis(n: int) -> Duration:
-        ret duration(civil.floor_div(n, 1000), civil.floor_mod(n, 1000) * 1000000)
+        ret duration(civil.floor_div(n, 1000), civil.floor_mod(n, 1000) * 1_000_000)
 
     fn of_micros(n: int) -> Duration:
-        ret duration(civil.floor_div(n, 1000000), civil.floor_mod(n, 1000000) * 1000)
+        ret duration(civil.floor_div(n, 1_000_000), civil.floor_mod(n, 1_000_000) * 1000)
 
     fn of_nanos(n: int) -> Duration:
-        ret duration(civil.floor_div(n, ns()), civil.floor_mod(n, ns()))
+        ret duration(civil.floor_div(n, ns), civil.floor_mod(n, ns))
 
     // The duration of `x` seconds, to the nanosecond below. It stops the program for nan, an
     // infinity, or a length out of range.
     fn of_seconds_float(x: float) -> Duration:
         assert x == x and x > -4.0e18 and x < 4.0e18, "datetime: {x} seconds is out of range for a duration"
         s = x.floor()
-        ret duration(s, int((x - float(s)) * 1000000000.0).unwrap())
+        ret duration(s, int((x - float(s)) * 1_000_000_000.0).unwrap())
 
     fn is_zero(self) -> bool:
         ret self.secs == 0 and self.nanos == 0
@@ -278,7 +270,7 @@ impl Duration:
         ret self.secs
 
     fn whole_millis(self) -> int:
-        ret whole_units(self, 1000000)
+        ret whole_units(self, 1_000_000)
 
     fn whole_micros(self) -> int:
         ret whole_units(self, 1000)
@@ -290,7 +282,7 @@ impl Duration:
     // The duration in seconds as a float, which rounds durations past about 104 days to less
     // than a nanosecond.
     fn as_seconds_float(self) -> float:
-        ret float(self.secs) + float(self.nanos) / 1000000000.0
+        ret float(self.secs) + float(self.nanos) / 1_000_000_000.0
 
     // Reads an ISO 8601 duration of days, hours, minutes, and seconds, such as "PT1H30M",
     // "P2DT0.5S", or "-PT10S". A day is 24 hours. Years and months belong to a Period.
@@ -311,23 +303,23 @@ impl neg for Duration:
     fn neg(self) -> Self:
         if self.nanos == 0:
             ret duration(-self.secs, 0)
-        ret duration(-self.secs - 1, ns() - self.nanos)
+        ret duration(-self.secs - 1, ns - self.nanos)
 
 // The duration `k` times as long, exactly.
 impl mul[int] for Duration:
     fn mul(self, k: int) -> Self:
-        kh = civil.floor_div(k, ns())
-        kl = civil.floor_mod(k, ns())
+        kh = civil.floor_div(k, ns)
+        kl = civil.floor_mod(k, ns)
         low = self.nanos * kl
         s = add_exact(mul_exact(self.secs, k, "duration"), mul_exact(self.nanos, kh, "duration"), "duration")
-        ret duration(add_exact(s, low / ns(), "duration"), low % ns())
+        ret duration(add_exact(s, low / ns, "duration"), low % ns)
 
 // The duration divided by `k`, truncated toward zero to the nanosecond, exactly.
 impl div[int] for Duration:
     fn div(self, k: int) -> Self:
         assert k != 0, "datetime: duration divided by zero"
-        if k == -9223372036854775807 - 1:
-            ret self / -2 / 4611686018427387904
+        if k == -9_223_372_036_854_775_807 - 1:
+            ret self / -2 / 4_611_686_018_427_387_904
         negative = self.is_negative() != (k < 0)
         m = self.abs()
         kk = k.abs()
@@ -335,7 +327,7 @@ impl div[int] for Duration:
         r = m.secs % kk
         qn = 0
         if r <= 9223372035:
-            qn = (r * ns() + m.nanos) / kk
+            qn = (r * ns + m.nanos) / kk
         else:
             qn = long_quotient(r, m.nanos, kk)
         q = duration(qs, qn)
@@ -500,7 +492,7 @@ pub struct Date:
 impl Date:
     // The date `year`-`month`-`day`, or an error if there is no such date.
     fn of(year: int, month: int, day: int) -> result[Date, str]:
-        if year < min_year() or year > max_year():
+        if year < min_year or year > max_year:
             ret err("year {year} is out of range (-999999 to 999999)")
         if month < 1 or month > 12:
             ret err("month {month} is out of range (1 to 12)")
@@ -511,7 +503,7 @@ impl Date:
 
     // The `day_of_year`th day of `year`, counting January 1 as 1.
     fn from_ordinal(year: int, day_of_year: int) -> result[Date, str]:
-        if year < min_year() or year > max_year():
+        if year < min_year or year > max_year:
             ret err("year {year} is out of range (-999999 to 999999)")
         n = civil.days_in_year(year)
         if day_of_year < 1 or day_of_year > n:
@@ -520,7 +512,7 @@ impl Date:
 
     // The `weekday` of ISO 8601 week `week` of the week-based year `iso_year`.
     fn from_iso_week(iso_year: int, week: int, weekday: Weekday) -> result[Date, str]:
-        if iso_year < min_year() + 1 or iso_year > max_year() - 1:
+        if iso_year < min_year + 1 or iso_year > max_year - 1:
             ret err("ISO year {iso_year} is out of range (-999998 to 999998)")
         n = civil.iso_weeks_in_year(iso_year)
         if week < 1 or week > n:
@@ -529,7 +521,7 @@ impl Date:
 
     // The date `days` days after 1970-01-01.
     fn from_epoch_days(days: int) -> Date:
-        assert days >= min_epoch_days() and days <= max_epoch_days(), "datetime: date {days} days from 1970-01-01 is outside the supported years (-999999 to 999999)"
+        assert days >= min_epoch_days and days <= max_epoch_days, "datetime: date {days} days from 1970-01-01 is outside the supported years (-999999 to 999999)"
         y, m, d = civil.civil_from_days(days)
         ret Date(year=y, month=m, day=d)
 
@@ -584,7 +576,7 @@ impl Date:
         total = add_exact(self.year * 12 + self.month - 1, n, "date")
         y = civil.floor_div(total, 12)
         m = civil.floor_mod(total, 12) + 1
-        assert y >= min_year() and y <= max_year(), "datetime: year {y} is outside the supported years (-999999 to 999999)"
+        assert y >= min_year and y <= max_year, "datetime: year {y} is outside the supported years (-999999 to 999999)"
         d = self.day
         if d > civil.days_in_month(y, m):
             d = civil.days_in_month(y, m)
@@ -661,8 +653,8 @@ pub struct Time:
     nanosecond: int
 
 fn time_from_nanos(n: int) -> Time:
-    s = n / ns()
-    ret Time(hour=s / 3600, minute=s / 60 % 60, second=s % 60, nanosecond=n % ns())
+    s = n / ns
+    ret Time(hour=s / 3600, minute=s / 60 % 60, second=s % 60, nanosecond=n % ns)
 
 impl Time:
     fn of(hour: int, minute: int, second: int) -> result[Time, str]:
@@ -675,7 +667,7 @@ impl Time:
             ret err("minute {minute} is out of range (0 to 59)")
         if second < 0 or second > 59:
             ret err("second {second} is out of range (0 to 59)")
-        if nanosecond < 0 or nanosecond > 999999999:
+        if nanosecond < 0 or nanosecond > 999_999_999:
             ret err("nanosecond {nanosecond} is out of range (0 to 999999999)")
         ret ok(Time(hour=hour, minute=minute, second=second, nanosecond=nanosecond))
 
@@ -689,11 +681,11 @@ impl Time:
     fn from_seconds_of_day(seconds: int) -> result[Time, str]:
         if seconds < 0 or seconds >= 86400:
             ret err("{seconds} seconds is out of range for a time of day (0 to 86399)")
-        ret ok(time_from_nanos(seconds * ns()))
+        ret ok(time_from_nanos(seconds * ns))
 
     // The time `nanos` after midnight, from 0 to 86399999999999.
     fn from_nanos_of_day(nanos: int) -> result[Time, str]:
-        if nanos < 0 or nanos >= 86400 * ns():
+        if nanos < 0 or nanos >= 86400 * ns:
             ret err("{nanos} nanoseconds is out of range for a time of day (0 to 86399999999999)")
         ret ok(time_from_nanos(nanos))
 
@@ -701,7 +693,7 @@ impl Time:
         ret self.hour * 3600 + self.minute * 60 + self.second
 
     fn nanos_of_day(self) -> int:
-        ret self.seconds_of_day() * ns() + self.nanosecond
+        ret self.seconds_of_day() * ns + self.nanosecond
 
     // The duration from this time to `other` on the same day, negative if `other` is earlier.
     fn duration_until(self, other: Time) -> Duration:
@@ -738,8 +730,8 @@ fn time_iso(input: str) -> result[Time, str]:
 // `t + d` is the time `d` later, going around midnight as a clock does.
 impl add[Duration] for Time:
     fn add(self, d: Duration) -> Self:
-        n = civil.floor_mod(d.secs, 86400) * ns() + d.nanos + self.nanos_of_day()
-        ret time_from_nanos(civil.floor_mod(n, 86400 * ns()))
+        n = civil.floor_mod(d.secs, 86400) * ns + d.nanos + self.nanos_of_day()
+        ret time_from_nanos(civil.floor_mod(n, 86400 * ns))
 
 impl sub[Duration] for Time:
     fn sub(self, d: Duration) -> Self:
@@ -768,9 +760,9 @@ fn local_seconds(dt: DateTime) -> int:
     ret dt.date.to_epoch_days() * 86400 + dt.time.seconds_of_day()
 
 fn datetime_from_local(secs: int, nanos: int) -> DateTime:
-    s = add_exact(secs, civil.floor_div(nanos, ns()), "date and time")
+    s = add_exact(secs, civil.floor_div(nanos, ns), "date and time")
     days = civil.floor_div(s, 86400)
-    n = civil.floor_mod(s, 86400) * ns() + civil.floor_mod(nanos, ns())
+    n = civil.floor_mod(s, 86400) * ns + civil.floor_mod(nanos, ns)
     ret DateTime(date=Date.from_epoch_days(days), time=time_from_nanos(n))
 
 impl DateTime:
@@ -990,9 +982,9 @@ pub struct Instant:
     nanos: int
 
 fn instant(secs: int, nanos: int) -> Instant:
-    s = add_exact(secs, civil.floor_div(nanos, ns()), "instant")
-    assert s >= min_unix_seconds() and s <= max_unix_seconds(), "datetime: instant {s} seconds from 1970 is outside the supported years (-999999 to 999999)"
-    ret Instant(secs=s, nanos=civil.floor_mod(nanos, ns()))
+    s = add_exact(secs, civil.floor_div(nanos, ns), "instant")
+    assert s >= min_unix_seconds and s <= max_unix_seconds, "datetime: instant {s} seconds from 1970 is outside the supported years (-999999 to 999999)"
+    ret Instant(secs=s, nanos=civil.floor_mod(nanos, ns))
 
 impl Instant:
     // The instant now, from the system clock, to the microsecond, since `time.now` gives the
@@ -1000,20 +992,20 @@ impl Instant:
     fn now() -> Instant:
         t = time.now()
         s = t.floor()
-        micros = int((t - float(s)) * 1000000.0 + 0.5).unwrap()
+        micros = int((t - float(s)) * 1_000_000.0 + 0.5).unwrap()
         ret instant(s, micros * 1000)
 
     fn from_unix(seconds: int) -> Instant:
         ret instant(seconds, 0)
 
     fn from_unix_millis(millis: int) -> Instant:
-        ret instant(civil.floor_div(millis, 1000), civil.floor_mod(millis, 1000) * 1000000)
+        ret instant(civil.floor_div(millis, 1000), civil.floor_mod(millis, 1000) * 1_000_000)
 
     fn from_unix_micros(micros: int) -> Instant:
-        ret instant(civil.floor_div(micros, 1000000), civil.floor_mod(micros, 1000000) * 1000)
+        ret instant(civil.floor_div(micros, 1_000_000), civil.floor_mod(micros, 1_000_000) * 1000)
 
     fn from_unix_nanos(nanos: int) -> Instant:
-        ret instant(civil.floor_div(nanos, ns()), civil.floor_mod(nanos, ns()))
+        ret instant(civil.floor_div(nanos, ns), civil.floor_mod(nanos, ns))
 
     // The whole seconds since 1970-01-01T00:00:00Z, rounded down, so they are negative before.
     fn unix_seconds(self) -> int:
@@ -1021,15 +1013,15 @@ impl Instant:
 
     // The milliseconds since 1970-01-01T00:00:00Z, rounded down.
     fn unix_millis(self) -> int:
-        ret self.secs * 1000 + self.nanos / 1000000
+        ret self.secs * 1000 + self.nanos / 1_000_000
 
     fn unix_micros(self) -> int:
-        ret self.secs * 1000000 + self.nanos / 1000
+        ret self.secs * 1_000_000 + self.nanos / 1000
 
     // The nanoseconds since 1970-01-01T00:00:00Z. It stops the program for instants outside
     // 1677 to 2262, which do not fit in an int.
     fn unix_nanos(self) -> int:
-        ret add_exact(mul_exact(self.secs, ns(), "unix nanoseconds"), self.nanos, "unix nanoseconds")
+        ret add_exact(mul_exact(self.secs, ns, "unix nanoseconds"), self.nanos, "unix nanoseconds")
 
     // The duration from `earlier` to this instant, negative if `earlier` is later.
     fn duration_since(self, earlier: Instant) -> Duration:
@@ -1447,7 +1439,7 @@ test "building dates":
     assert Date.of(2024, 2, 29).is_ok()
     assert Date.of(2023, 2, 29) == err("day 29 is out of range for 2023-02 (1 to 28)")
     assert Date.of(2026, 13, 1) == err("month 13 is out of range (1 to 12)")
-    assert Date.of(1000000, 1, 1) == err("year 1000000 is out of range (-999999 to 999999)")
+    assert Date.of(1_000_000, 1, 1) == err("year 1000000 is out of range (-999999 to 999999)")
     assert Date.from_ordinal(2026, 310) == Date.of(2026, 11, 6)
     assert Date.from_ordinal(2026, 366).is_err()
     assert Date.from_iso_week(2020, 53, Weekday.Sunday) == Date.of(2021, 1, 3)
@@ -1583,9 +1575,9 @@ test "duration multiplication and division are exact":
     assert Duration.of_nanos(-7) / 2 == Duration.of_nanos(-3)
     assert Duration.of_seconds(1) / 3 == Duration.of_nanos(333333333)
     assert Duration.of_days(365000000) / 7 == Duration(secs=4505142857142, nanos=857142857)
-    big = Duration(secs=4611686018427387903, nanos=999999999)
+    big = Duration(secs=4611686018427387903, nanos=999_999_999)
     assert big / 100000000000 == Duration(secs=46116860, nanos=184273879)
-    assert big / (-9223372036854775807 - 1) == Duration.of_nanos(-499999999)
+    assert big / (-9_223_372_036_854_775_807 - 1) == Duration.of_nanos(-499999999)
     assert big / 1 == big
 
 test "duration display and parsing":
@@ -1724,8 +1716,8 @@ test "the far ends of the supported years":
     assert Date.from_epoch_days(hi.to_epoch_days()) == hi
     assert str(hi) == "+999999-12-31"
     assert str(lo) == "-999999-01-01"
-    end = hi.at(Time.of_nanos(23, 59, 59, 999999999).unwrap())
-    assert Instant.from_unix(31494784780799).to_utc().datetime == end - Duration.of_nanos(999999999)
+    end = hi.at(Time.of_nanos(23, 59, 59, 999_999_999).unwrap())
+    assert Instant.from_unix(31494784780799).to_utc().datetime == end - Duration.of_nanos(999_999_999)
     assert lo.at(Time.midnight()).assume_utc() == Instant.from_unix(-31619087596800)
     assert lo.days_until(hi) == 730484633
 

@@ -279,10 +279,11 @@ fn posix_rule(cs: list[str], i: int) -> result[tuple[Rule, int], str]:
 fn be(data: bytes, pos: int, n: int) -> int:
     v = 0
     for k in range(n):
-        // For 8 bytes this wraps around to the two's complement value, as wanted.
+        // For 8 bytes this wraps around to the two's complement value, as wanted. `v << 8` would
+        // not: a shift whose result does not fit stops the program.
         v = v * 256 + data[pos + k]
-    if n == 4 and v >= 2147483648:
-        v -= 4294967296
+    if n == 4 and v >= 1 << 31:
+        v -= 1 << 32
     ret v
 
 struct Header:
@@ -489,8 +490,8 @@ fn be_bytes(v: int, n: int) -> list[int]:
     out = []
     x = v
     for _k in range(n):
-        out.insert(0, civil.floor_mod(x, 256))
-        x = civil.floor_div(x, 256)
+        out.insert(0, x & 0xff)
+        x >>= 8
     ret out
 
 // A TZif data block with a header, for a zone of LMT, CST, and CDT with three changes.
@@ -524,30 +525,28 @@ fn sample_tzif(version: int, footer: str, leapcnt: int) -> bytes:
         data.append(10)
     ret bytes(data).unwrap()
 
-fn cst() -> tuple[int, bool, str]:
-    ret (-21600, false, "CST")
+const cst = (-21_600, false, "CST")
 
-fn cdt() -> tuple[int, bool, str]:
-    ret (-18000, true, "CDT")
+const cdt = (-18_000, true, "CDT")
 
 test "TZif version 2 with a footer":
     r = read_tzif(sample_tzif(50, "CST6CDT,M3.2.0,M11.1.0", 0)).unwrap()
     assert r.times == [-2717647200, 1772956800, 1793516400]
     assert r.abbrs == ["LMT", "CST", "CDT"]
     assert info_at(r, -3000000000) == (-21036, false, "LMT")
-    assert info_at(r, 0) == cst()
-    assert info_at(r, 1772956799) == cst()
-    assert info_at(r, 1772956800) == cdt()
-    assert info_at(r, 1793516399) == cdt()
-    assert info_at(r, 1793516400) == cst()
+    assert info_at(r, 0) == cst
+    assert info_at(r, 1772956799) == cst
+    assert info_at(r, 1772956800) == cdt
+    assert info_at(r, 1793516399) == cdt
+    assert info_at(r, 1793516400) == cst
     // After the last change the footer decides: 2030-07-01 and 2030-01-01.
-    assert info_at(r, 1909094400) == cdt()
-    assert info_at(r, 1893456000) == cst()
+    assert info_at(r, 1909094400) == cdt
+    assert info_at(r, 1893456000) == cst
 
 test "TZif version 1 has no footer":
     r = read_tzif(sample_tzif(0, "", 0)).unwrap()
     assert r.footer == none
-    assert info_at(r, 1909094400) == cst()
+    assert info_at(r, 1909094400) == cst
 
 test "TZif errors":
     assert read_tzif(sample_tzif(50, "CST6CDT,M3.2.0,M11.1.0", 1)) == err("leap-second zones (right/...) are not supported")

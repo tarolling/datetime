@@ -474,7 +474,7 @@ pub fn iso_duration(input: str) -> result[tuple[int, int], str]:
         per = [86400, 3600, 60, 1][idx]
         match civil.checked_mul(n, per):
             case some(v):
-                total = civil.checked_add(total, v).unwrap_or(4611686018427387904)
+                total = civil.checked_add(total, v).unwrap_or(4_611_686_018_427_387_904)
             case none:
                 ret err("the duration is too long")
         if total > 4611686018427387903:
@@ -486,7 +486,7 @@ pub fn iso_duration(input: str) -> result[tuple[int, int], str]:
         ret err("expected at least one number and unit")
     if s < 0:
         if nanos > 0:
-            ret ok((-total - 1, 1000000000 - nanos))
+            ret ok((-total - 1, 1_000_000_000 - nanos))
         ret ok((-total, 0))
     ret ok((total, nanos))
 

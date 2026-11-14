@@ -210,7 +210,7 @@ pub fn checked_add(a: int, b: int) -> option[int]:
 pub fn checked_mul(a: int, b: int) -> option[int]:
     if a == 0 or b == 0:
         ret some(0)
-    smallest = -9223372036854775807 - 1
+    smallest = -9_223_372_036_854_775_807 - 1
     if a == -1:
         if b == smallest:
             ret none
@@ -225,7 +225,7 @@ pub fn checked_mul(a: int, b: int) -> option[int]:
     ret some(r)
 
 test "checked arithmetic":
-    big = 9223372036854775807
+    big = 9_223_372_036_854_775_807
     assert checked_add(1, 2) == some(3)
     assert checked_add(big, 1) == none
     assert checked_add(-big, -2) == none
@@ -234,5 +234,5 @@ test "checked arithmetic":
     assert checked_mul(big, 2) == none
     assert checked_mul(-1, -big - 1) == none
     assert checked_mul(-big - 1, -1) == none
-    assert checked_mul(4294967296, 4294967296) == none
+    assert checked_mul(4_294_967_296, 4_294_967_296) == none
     assert checked_mul(3037000499, 3037000499) == some(9223372030926249001)
