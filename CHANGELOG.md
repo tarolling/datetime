@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.1 (unreleased)
+## 0.2.1 (2026-11-13)
 
 This release needs stone 0.4.6. The API is unchanged.
 
